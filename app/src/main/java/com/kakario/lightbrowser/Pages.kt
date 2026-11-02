@@ -160,6 +160,18 @@ class Pages(private val a: MainActivity) {
             st.unblockDownloads) { st.unblockDownloads = it }
 
         section(body, "화면 · 검색")
+        var zoomSub: TextView? = null
+        zoomSub = row(body, "웹페이지 글자 크기", "${st.textZoom}%", null) {
+            val opts = intArrayOf(80, 90, 100, 110, 120, 130, 150)
+            AlertDialog.Builder(a)
+                .setTitle("웹페이지 글자 크기")
+                .setSingleChoiceItems(opts.map { "$it%" + if (it == 100) " (기본)" else "" }.toTypedArray(),
+                    opts.indexOf(st.textZoom)) { d, w ->
+                    a.setTextZoom(opts[w])
+                    zoomSub?.text = "${opts[w]}%"
+                    d.dismiss()
+                }.show()
+        }
         switchRow(body, "다크 모드일 때 웹페이지도 어둡게", "폰이 다크 모드일 때 적용", st.darkPages) {
             st.darkPages = it
             a.applyDarkAll()

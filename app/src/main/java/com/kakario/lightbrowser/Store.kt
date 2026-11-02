@@ -78,6 +78,11 @@ class Store(ctx: Context) {
         get() = p.getString("dlTree", null)
         set(v) = p.edit().putString("dlTree", v).apply()
 
+    /** 웹페이지 글자 크기(%) — 폰 글꼴 설정과 상관없이 이 값으로 고정 */
+    var textZoom: Int
+        get() = p.getInt("textZoom", 100)
+        set(v) = p.edit().putInt("textZoom", v).apply()
+
     var darkPages: Boolean
         get() = p.getBoolean("darkPages", true)
         set(v) = p.edit().putBoolean("darkPages", v).apply()

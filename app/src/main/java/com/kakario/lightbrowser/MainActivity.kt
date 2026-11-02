@@ -929,6 +929,11 @@ class MainActivity : Activity() {
         if (!isNight()) toast("폰이 다크 모드일 때 적용돼요")
     }
 
+    fun setTextZoom(z: Int) {
+        store.textZoom = z
+        tabs.forEach { it.webView.settings.textZoom = z }
+    }
+
     fun setAdblock(on: Boolean) {
         adblock = on
         store.adblock = on
@@ -948,6 +953,10 @@ class MainActivity : Activity() {
             javaScriptEnabled = true
             domStorageEnabled = true
             loadWithOverviewMode = true
+            // 크롬처럼: PC용 페이지를 줄여 보여줄 때 글자만 읽을 만한 크기로 키움
+            layoutAlgorithm = WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
+            // 폰 글꼴 크기 설정이 웹페이지 배치를 망가뜨리지 않게 고정
+            textZoom = store.textZoom
             useWideViewPort = true
             builtInZoomControls = true
             displayZoomControls = false

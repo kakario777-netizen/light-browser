@@ -48,6 +48,9 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.webkit.ProxyConfig
+import androidx.webkit.ProxyController
+import androidx.webkit.WebViewFeature
 
 /** 탭 하나 = 웹뷰 하나 */
 class Tab(val webView: WebView) {
@@ -96,6 +99,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         store = Store(this)
         adblock = store.adblock
+        if (store.bypass) applyBypass(true, reload = false)
         buildUi()
         setupWindow()
 
@@ -893,6 +897,33 @@ class MainActivity : Activity() {
         if (tabs.isNotEmpty() && tab.home) content.post { buildHome() }
     }
 
+    // ================= 차단 우회 =================
+
+    /** 켜면 웹뷰의 모든 접속을 앱 내부 중계기(Bypass)로 돌린다 */
+    private fun applyBypass(on: Boolean, reload: Boolean) {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+            toast("이 폰의 웹뷰는 우회 기능을 지원하지 않아요. 플레이스토어에서 Android System WebView를 업데이트해 주세요")
+            return
+        }
+        val main = android.os.Handler(mainLooper)
+        val exec = java.util.concurrent.Executor { main.post(it) }
+        val done = Runnable {
+            if (reload) tabs.getOrNull(cur)?.let { if (!it.home) it.webView.reload() }
+        }
+        try {
+            if (on) {
+                val port = Bypass.start()
+                val cfg = ProxyConfig.Builder().addProxyRule("127.0.0.1:$port").build()
+                ProxyController.getInstance().setProxyOverride(cfg, exec, done)
+            } else {
+                ProxyController.getInstance().clearProxyOverride(exec, done)
+                Bypass.stop()
+            }
+        } catch (e: Exception) {
+            toast("우회 기능을 켜지 못했어요")
+        }
+    }
+
     // ================= 메뉴 =================
 
     private fun showMenu(anchor: View) {
@@ -904,6 +935,7 @@ class MainActivity : Activity() {
         m.add(0, 3, 0, "방문 기록")
         m.add(0, 4, 0, "다운로드 목록")
         m.add(0, 5, 0, "페이지 공유")
+        m.add(0, 10, 0, "차단 우회 (보안 DNS)").apply { isCheckable = true; isChecked = store.bypass }
         m.add(0, 6, 0, "데스크톱 모드").apply { isCheckable = true; isChecked = t.desktop }
         m.add(0, 7, 0, "광고 차단").apply { isCheckable = true; isChecked = adblock }
         m.add(0, 8, 0, "다크 모드일 때 웹페이지도 어둡게").apply { isCheckable = true; isChecked = store.darkPages }
@@ -937,6 +969,11 @@ class MainActivity : Activity() {
                     store.darkPages = !store.darkPages
                     tabs.forEach { applyDark(it.webView.settings) }
                     if (!isNight()) toast("폰이 다크 모드일 때 적용돼요")
+                }
+                10 -> {
+                    store.bypass = !store.bypass
+                    applyBypass(store.bypass, reload = true)
+                    toast(if (store.bypass) "차단 우회 켬" else "차단 우회 끔")
                 }
                 9 -> AlertDialog.Builder(this)
                     .setTitle("검색 엔진")

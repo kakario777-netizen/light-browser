@@ -64,6 +64,10 @@ class Store(ctx: Context) {
         get() = p.getBoolean("adblock", true)
         set(v) = p.edit().putBoolean("adblock", v).apply()
 
+    var bypass: Boolean
+        get() = p.getBoolean("bypass", false)
+        set(v) = p.edit().putBoolean("bypass", v).apply()
+
     var darkPages: Boolean
         get() = p.getBoolean("darkPages", true)
         set(v) = p.edit().putBoolean("darkPages", v).apply()

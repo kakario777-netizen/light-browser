@@ -16,12 +16,12 @@ HOSTS_SOURCES = [
     "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
     "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=nohtml&showintro=0&mimetype=plaintext",
 ]
+# (주소 후보들, 모든 사이트 공통 숨김 규칙도 쓸지)
+# EasyList의 공통 숨김 규칙은 수만 개라 페이지가 느려지므로 사이트별 규칙만 쓴다
 ABP_SOURCES = [
-    # 한국 사이트 전용 목록 (주소가 바뀌었을 수 있어 여러 개 시도)
-    ["https://raw.githubusercontent.com/List-KR/List-KR/master/filter-uBlockOrigin.txt",
-     "https://raw.githubusercontent.com/List-KR/List-KR/master/filter.txt",
-     "https://raw.githubusercontent.com/List-KR/List-KR/main/filter.txt"],
-    ["https://easylist.to/easylist/easylist.txt"],
+    (["https://cdn.jsdelivr.net/npm/@list-kr/filterslists@latest/dist/filterslist-uBlockOrigin.txt",
+      "https://cdn.jsdelivr.net/npm/@list-kr/filterslists@latest/dist/filterslist-AdGuard.txt"], True),
+    (["https://easylist.to/easylist/easylist.txt"], False),
 ]
 
 # 일부 목록에 들어 있지만 막으면 사이트가 깨지는 주소
@@ -61,12 +61,12 @@ for url in HOSTS_SOURCES:
     except Exception as e:
         report.append(f"FAIL {url}: {e}")
 
-for candidates in ABP_SOURCES:
+for candidates, use_generic in ABP_SOURCES:
     text = None
     for url in candidates:
         try:
             text = fetch(url)
-            if "[Adblock" in text[:500] or "!" in text[:5] or "##" in text:
+            if "##" in text or "||" in text:
                 break
             text = None
         except Exception:
@@ -89,7 +89,8 @@ for candidates in ABP_SOURCES:
             if any(d.startswith("~") for d in doms):
                 continue  # 예외 지정이 있는 규칙은 단순화를 위해 건너뜀
             if not doms:
-                cosmetic.add("\t" + sel)
+                if use_generic:
+                    cosmetic.add("\t" + sel)
             else:
                 for d in doms:
                     if HOST_RE.match(d):
@@ -107,7 +108,8 @@ for candidates in ABP_SOURCES:
             h = m.group(1).lower().strip(".")
             if HOST_RE.match(h) and h not in ALLOW:
                 hosts.add(h)
-    report.append(f"{candidates[0].split('/')[2]}/{candidates[0].split('/')[4] if 'githubusercontent' in candidates[0] else ''} hosts+{len(hosts) - nh} hide+{len(cosmetic) - nc}")
+    gen = sum(1 for c in cosmetic if c.startswith("\t"))
+    report.append(f"{candidates[0].split('/')[2]} hosts+{len(hosts) - nh} hide+{len(cosmetic) - nc} (generic total {gen})")
 
 with open(os.path.join(OUT, "hosts.txt"), "w") as f:
     f.write("\n".join(sorted(hosts)))

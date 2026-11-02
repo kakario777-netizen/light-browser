@@ -48,8 +48,6 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import androidx.webkit.WebSettingsCompat
-import androidx.webkit.WebViewFeature
 
 /** 탭 하나 = 웹뷰 하나 */
 class Tab(val webView: WebView) {
@@ -577,9 +575,8 @@ class MainActivity : Activity() {
     private fun isCurrent(v: WebView?) = tabs.getOrNull(cur)?.let { !it.home && it.webView === v } == true
 
     private fun applyDark(s: WebSettings) {
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
-            WebSettingsCompat.setAlgorithmicDarkening(s, store.darkPages)
-        }
+        // 안드로이드 13 이상: 앱이 다크 테마일 때 웹페이지도 자동으로 어둡게
+        if (Build.VERSION.SDK_INT >= 33) s.isAlgorithmicDarkeningAllowed = store.darkPages
     }
 
     private fun setDesktop(t: Tab, on: Boolean) {

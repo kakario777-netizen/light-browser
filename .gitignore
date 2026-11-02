@@ -10,3 +10,4 @@
 .cxx/
 *.apk
 !app/debug.keystore
+/app/src/main/assets/adblock/

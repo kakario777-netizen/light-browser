@@ -30,6 +30,8 @@ import android.view.WindowInsetsController
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
+import android.webkit.JsPromptResult
+import android.webkit.JsResult
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -60,6 +62,9 @@ class Tab(val webView: WebView) {
     var openedByLink = false   // 새 창 링크로 열린 탭 → 더 뒤로 갈 곳이 없으면 탭을 닫음
     var pendingUrl: String? = null
     var title = ""
+    var opener: Tab? = null            // 이 탭을 연 탭 (광고 탭을 닫으면 여기로 돌아감)
+    var allowUrl: String? = null       // 사용자가 직접 입력한 주소는 차단하지 않음
+    var dialogCount = 0                // 한 페이지에서 띄운 알림창 수
 }
 
 class MainActivity : Activity() {
@@ -99,6 +104,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         store = Store(this)
         adblock = store.adblock
+        AdBlock.load(this)
         if (store.bypass) applyBypass(true, reload = false)
         buildUi()
         setupWindow()
@@ -401,9 +407,11 @@ class MainActivity : Activity() {
 
     private fun closeTab(i: Int) {
         if (i !in tabs.indices) return
+        val wasCurrent = i == cur
         val t = tabs.removeAt(i)
         (t.webView.parent as? ViewGroup)?.removeView(t.webView)
         t.webView.destroy()
+        tabs.forEach { if (it.opener === t) it.opener = null }
         if (tabs.isEmpty()) {
             cur = 0
             newTab(null)
@@ -411,6 +419,7 @@ class MainActivity : Activity() {
         }
         if (i < cur) cur--
         if (cur >= tabs.size) cur = tabs.size - 1
+        if (wasCurrent) t.opener?.let { o -> tabs.indexOf(o).takeIf { it >= 0 }?.let { cur = it } }
         showTab()
     }
 
@@ -505,6 +514,7 @@ class MainActivity : Activity() {
         t.home = false
         t.homeByButton = false
         t.pendingUrl = toUrl(input)
+        t.allowUrl = t.pendingUrl
         showTab()
     }
 
@@ -521,6 +531,21 @@ class MainActivity : Activity() {
             return false
         }
         if (t.webView.canGoBack()) {
+            // 광고 페이지는 건너뛰고 그 전 페이지로
+            val list = t.webView.copyBackForwardList()
+            var i = list.currentIndex - 1
+            while (i > 0 && isJunk(list.getItemAtIndex(i).url)) i--
+            if (i >= 0 && !isJunk(list.getItemAtIndex(i).url)) {
+                t.webView.goBackOrForward(i - list.currentIndex)
+                return true
+            }
+            if (i == 0 && isJunk(list.getItemAtIndex(0).url)) {
+                // 남은 기록이 전부 광고면 첫 화면으로
+                if (t.openedByLink && tabs.size > 1) closeTab(cur) else {
+                    t.home = true; t.homeByButton = false; showTab()
+                }
+                return true
+            }
             t.webView.goBack()
             return true
         }
@@ -637,6 +662,13 @@ class MainActivity : Activity() {
     inner class Client : WebViewClient() {
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
             val scheme = request.url.scheme?.lowercase() ?: return false
+            if (adblock && request.isForMainFrame && (scheme == "http" || scheme == "https") &&
+                AdBlock.blocked(request.url.host)
+            ) {
+                // 링크를 눌렀는데 광고 페이지로 넘기려는 경우 → 이동 자체를 취소
+                dropAdPage(view)
+                return true
+            }
             if (scheme in WEB_SCHEMES) return false
             openExternal(view, request.url.toString())
             return true
@@ -648,6 +680,13 @@ class MainActivity : Activity() {
         }
 
         override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
+            val t = findTab(view)
+            if (t != null) t.dialogCount = 0
+            if (adblock && url != null && url != t?.allowUrl && AdBlock.blockedUrl(url)) {
+                view.stopLoading()
+                dropAdPage(view)
+                return
+            }
             if (isCurrent(view)) {
                 loading = true
                 progress.visibility = View.VISIBLE
@@ -655,12 +694,17 @@ class MainActivity : Activity() {
             }
         }
 
+        override fun onPageCommitVisible(view: WebView, url: String?) {
+            if (adblock) view.evaluateJavascript(AdBlock.hideScript(Uri.parse(url ?: "").host), null)
+        }
+
         override fun onPageFinished(view: WebView, url: String?) {
             if (isCurrent(view)) {
                 loading = false
                 updateUi()
             }
-            if (url != null && url.startsWith("http")) store.addHistory(view.title ?: url, url)
+            if (adblock) view.evaluateJavascript(AdBlock.hideScript(Uri.parse(url ?: "").host), null)
+            if (url != null && url.startsWith("http") && !AdBlock.blockedUrl(url)) store.addHistory(view.title ?: url, url)
         }
 
         override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
@@ -681,13 +725,11 @@ class MainActivity : Activity() {
 
         /** 새 창으로 열리는 링크 → 새 탭. 사용자가 누르지 않은 팝업은 막는다 */
         override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message): Boolean {
-            if (!isUserGesture) {
-                toast("팝업을 막았어요")
-                return false
-            }
+            if (!isUserGesture) return false   // 저절로 뜨는 팝업은 조용히 막음
             val t = Tab(createWebView())
             t.home = false
             t.openedByLink = true
+            t.opener = findTab(view)
             tabs.getOrNull(cur)?.webView?.onPause()
             tabs.add(t)
             cur = tabs.size - 1
@@ -695,6 +737,28 @@ class MainActivity : Activity() {
             val transport = resultMsg.obj as WebView.WebViewTransport
             transport.webView = t.webView
             resultMsg.sendToTarget()
+            return true
+        }
+
+        override fun onJsAlert(view: WebView, url: String?, message: String?, result: JsResult): Boolean =
+            jsDialog(view, url, message, result, confirm = false)
+
+        override fun onJsConfirm(view: WebView, url: String?, message: String?, result: JsResult): Boolean =
+            jsDialog(view, url, message, result, confirm = true)
+
+        override fun onJsPrompt(
+            view: WebView, url: String?, message: String?, defaultValue: String?, result: JsPromptResult
+        ): Boolean {
+            if (adblock && shouldMuteDialog(view, url)) {
+                result.cancel()
+                return true
+            }
+            return false
+        }
+
+        /** "이 페이지를 나가시겠습니까?" 창은 묻지 않고 바로 나감 */
+        override fun onJsBeforeUnload(view: WebView, url: String?, message: String?, result: JsResult): Boolean {
+            result.confirm()
             return true
         }
 
@@ -734,6 +798,62 @@ class MainActivity : Activity() {
             fileCallback?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data))
             fileCallback = null
         }
+    }
+
+    // ================= 광고 처리 =================
+
+    private val mutedSites = HashSet<String>()
+
+    private fun isJunk(url: String?) = adblock && AdBlock.blockedUrl(url)
+
+    /** 광고 페이지로 넘어가려 할 때: 광고용 새 탭이면 닫고, 아니면 그 자리에 머문다 */
+    private fun dropAdPage(view: WebView) {
+        val t = findTab(view) ?: return
+        content.post {
+            if (t !in tabs) return@post
+            val list = t.webView.copyBackForwardList()
+            val nothingReal = (0 until list.size).all { isJunk(list.getItemAtIndex(it).url) }
+            if (t.openedByLink && nothingReal && tabs.size > 1) {
+                closeTab(tabs.indexOf(t))
+            } else if (isJunk(t.webView.url) && t === tabs.getOrNull(cur)) {
+                goBack()
+            }
+        }
+    }
+
+    /** 광고 서버에서 띄운 창, 반복해서 뜨는 창, 그만 보기 한 사이트의 창은 막음 */
+    private fun shouldMuteDialog(view: WebView, url: String?): Boolean {
+        val pageSite = AdBlock.site(Uri.parse(view.url ?: "").host)
+        val frameHost = Uri.parse(url ?: "").host
+        val t = findTab(view)
+        return AdBlock.blocked(frameHost) ||
+            pageSite in mutedSites ||
+            (t != null && t.dialogCount >= 3) ||
+            (t != null && tabs.getOrNull(cur) !== t)
+    }
+
+    private fun jsDialog(view: WebView, url: String?, message: String?, result: JsResult, confirm: Boolean): Boolean {
+        val t = findTab(view)
+        if (adblock && shouldMuteDialog(view, url)) {
+            result.cancel()
+            return true
+        }
+        t?.dialogCount = (t?.dialogCount ?: 0) + 1
+        val pageSite = AdBlock.site(Uri.parse(view.url ?: "").host)
+        var answered = false
+        val b = AlertDialog.Builder(this)
+            .setTitle(pageSite.ifEmpty { "알림" })
+            .setMessage(message ?: "")
+            .setPositiveButton("확인") { _, _ -> answered = true; result.confirm() }
+            .setNeutralButton("이 사이트 알림 그만") { _, _ ->
+                answered = true
+                mutedSites.add(pageSite)
+                result.cancel()
+            }
+            .setOnDismissListener { if (!answered) result.cancel() }
+        if (confirm) b.setNegativeButton("취소") { _, _ -> answered = true; result.cancel() }
+        b.show()
+        return true
     }
 
     // ================= 동영상 전체화면 =================

@@ -5,4 +5,6 @@
     <color name="field">#F1F2F4</color>
     <color name="line">#E4E4E4</color>
     <color name="accent">#E5262D</color>
+    <color name="switcher">#E9EAED</color>
+    <color name="snack">#2E2E30</color>
 </resources>

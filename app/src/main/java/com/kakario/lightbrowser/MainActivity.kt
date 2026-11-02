@@ -3,8 +3,9 @@ package com.kakario.lightbrowser
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlertDialog
-import android.app.DownloadManager
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.ColorStateList
@@ -16,23 +17,25 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
+import android.os.Handler
 import android.os.Message
 import android.text.InputType
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.JsPromptResult
 import android.webkit.JsResult
-import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -44,6 +47,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.GridLayout
 import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.ProgressBar
@@ -53,6 +57,7 @@ import android.widget.Toast
 import androidx.webkit.ProxyConfig
 import androidx.webkit.ProxyController
 import androidx.webkit.WebViewFeature
+import org.json.JSONObject
 
 /** 탭 하나 = 웹뷰 하나 */
 class Tab(val webView: WebView) {
@@ -62,22 +67,28 @@ class Tab(val webView: WebView) {
     var openedByLink = false   // 새 창 링크로 열린 탭 → 더 뒤로 갈 곳이 없으면 탭을 닫음
     var pendingUrl: String? = null
     var title = ""
-    var opener: Tab? = null            // 이 탭을 연 탭 (광고 탭을 닫으면 여기로 돌아감)
+    var opener: Tab? = null            // 이 탭을 연 탭 (닫으면 여기로 돌아감)
     var allowUrl: String? = null       // 사용자가 직접 입력한 주소는 차단하지 않음
     var dialogCount = 0                // 한 페이지에서 띄운 알림창 수
+    var thumb: Bitmap? = null          // 탭 목록 미리보기
 }
 
 class MainActivity : Activity() {
 
-    private lateinit var store: Store
+    lateinit var store: Store
     private val tabs = mutableListOf<Tab>()
     private var cur = 0
     private val tab get() = tabs[cur]
+    val tabList: List<Tab> get() = tabs
+    val curIndex get() = cur
 
     @Volatile private var adblock = true
+    val adblockOn get() = adblock
 
+    lateinit var frame: FrameLayout
     private lateinit var root: LinearLayout
     private lateinit var address: EditText
+    private lateinit var starBtn: ImageButton
     private lateinit var reloadBtn: ImageButton
     private lateinit var progress: ProgressBar
     private lateinit var content: FrameLayout
@@ -86,13 +97,17 @@ class MainActivity : Activity() {
     private lateinit var backBtn: ImageButton
     private lateinit var fwdBtn: ImageButton
     private lateinit var tabsBtn: TextView
+    private lateinit var switcher: TabSwitcher
+    private lateinit var pages: Pages
 
     private var loading = false
     private var customView: View? = null
     private var customCallback: WebChromeClient.CustomViewCallback? = null
     private var fileCallback: ValueCallback<Array<Uri>>? = null
+    private var folderPicked: (() -> Unit)? = null
+    private var blobPending = 0
 
-    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+    fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
     private fun col(id: Int) = getColor(id)
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
     private fun isNight() =
@@ -105,9 +120,13 @@ class MainActivity : Activity() {
         store = Store(this)
         adblock = store.adblock
         AdBlock.load(this)
+        Downloads.init(this)
+        Downloads.onFinish = { onDownloadFinished(it) }
         if (store.bypass) applyBypass(true, reload = false)
         buildUi()
         setupWindow()
+        switcher = TabSwitcher(this)
+        pages = Pages(this)
 
         val (urls, idx) = store.loadSession()
         if (urls.isEmpty()) {
@@ -127,7 +146,10 @@ class MainActivity : Activity() {
 
     private fun handleIntent(i: Intent?) {
         if (i?.action == Intent.ACTION_VIEW) {
-            i.data?.toString()?.let { newTab(it) }
+            i.data?.toString()?.let {
+                closeOverlays()
+                newTab(it)
+            }
         }
     }
 
@@ -140,11 +162,13 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        tabs.getOrNull(cur)?.webView?.onResume()
+        tabs.getOrNull(cur)?.let { if (!it.home) it.webView.onResume() }
     }
 
     override fun onDestroy() {
         tabs.forEach { it.webView.destroy() }
+        closedTab?.first?.webView?.destroy()
+        if (Downloads.onFinish != null) Downloads.onFinish = null
         super.onDestroy()
     }
 
@@ -161,13 +185,21 @@ class MainActivity : Activity() {
 
     // ================= 화면 구성 =================
 
-    private fun iconBtn(res: Int, desc: String, onClick: () -> Unit) = ImageButton(this).apply {
+    fun ripple(v: View, borderless: Boolean = false) {
+        val tv = TypedValue()
+        theme.resolveAttribute(
+            if (borderless) android.R.attr.selectableItemBackgroundBorderless else android.R.attr.selectableItemBackground,
+            tv, true
+        )
+        v.setBackgroundResource(tv.resourceId)
+    }
+
+    fun iconBtn(res: Int, desc: String, onClick: () -> Unit) = ImageButton(this).apply {
         setImageResource(res)
         imageTintList = ColorStateList.valueOf(col(R.color.text))
         contentDescription = desc
-        val tv = TypedValue()
-        context.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true)
-        setBackgroundResource(tv.resourceId)
+        scaleType = ImageView.ScaleType.CENTER_INSIDE
+        ripple(this, borderless = true)
         setOnClickListener { onClick() }
     }
 
@@ -185,17 +217,23 @@ class MainActivity : Activity() {
 
     @SuppressLint("ClickableViewAccessibility")
     private fun buildUi() {
+        frame = FrameLayout(this).apply { setBackgroundColor(col(R.color.bar)) }
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(col(R.color.bar))
             isFocusableInTouchMode = true
         }
 
-        // ---- 위: 주소창 ----
+        // ---- 위: 주소창 + 별(즐겨찾기) + 새로고침/이동 ----
         val top = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(10), dp(6), dp(4), dp(6))
+        }
+        val field = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = rounded(col(R.color.field), dp(20))
         }
         address = EditText(this).apply {
             hint = "검색어 또는 주소 입력"
@@ -203,8 +241,8 @@ class MainActivity : Activity() {
             textSize = 15f
             setTextColor(col(R.color.text))
             setHintTextColor(col(R.color.sub))
-            background = rounded(col(R.color.field), dp(20))
-            setPadding(dp(16), dp(9), dp(16), dp(9))
+            background = null
+            setPadding(dp(16), dp(9), dp(6), dp(9))
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             imeOptions = EditorInfo.IME_ACTION_GO or EditorInfo.IME_FLAG_NO_EXTRACT_UI
             setSelectAllOnFocus(true)
@@ -213,26 +251,30 @@ class MainActivity : Activity() {
                     val t = tabs.getOrNull(cur) ?: return@setOnFocusChangeListener
                     setText(if (t.home) "" else (t.pendingUrl ?: t.webView.url ?: ""))
                     selectAll()
-                } else {
-                    updateUi()
                 }
+                updateUi()
             }
             setOnEditorActionListener { _, action, ev ->
                 val enter = ev != null && ev.keyCode == KeyEvent.KEYCODE_ENTER && ev.action == KeyEvent.ACTION_DOWN
                 if (action == EditorInfo.IME_ACTION_GO || enter) {
-                    val q = text.toString().trim()
-                    leaveAddress()
-                    if (q.isNotEmpty()) load(q)
+                    goFromAddress()
                     true
                 } else false
             }
         }
+        starBtn = iconBtn(R.drawable.ic_star_border, "즐겨찾기") { toggleStar() }
+        field.addView(address, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        field.addView(starBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
         reloadBtn = iconBtn(R.drawable.ic_refresh, "새로고침") {
+            if (address.hasFocus()) {
+                goFromAddress()
+                return@iconBtn
+            }
             val t = tab
             if (t.home) return@iconBtn
             if (loading) t.webView.stopLoading() else t.webView.reload()
         }
-        top.addView(address, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        top.addView(field, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         top.addView(reloadBtn, LinearLayout.LayoutParams(dp(44), dp(44)))
 
         progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
@@ -245,16 +287,16 @@ class MainActivity : Activity() {
 
         content = FrameLayout(this)
 
-        // ---- 첫 화면(즐겨찾기 바로가기) ----
+        // ---- 첫 화면(즐겨찾기 미리보기) ----
         homeGrid = GridLayout(this)
         val homeBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(28), dp(16), dp(24))
+            setPadding(dp(10), dp(22), dp(10), dp(24))
             addView(TextView(context).apply {
                 text = "즐겨찾기"
                 textSize = 13f
                 setTextColor(col(R.color.sub))
-                setPadding(dp(6), 0, 0, dp(14))
+                setPadding(dp(8), 0, 0, dp(12))
             })
             addView(homeGrid)
         }
@@ -277,6 +319,7 @@ class MainActivity : Activity() {
         val homeBtn = iconBtn(R.drawable.ic_home, "홈") {
             val t = tab
             if (!t.home) {
+                captureCurrentTab()
                 t.home = true
                 t.homeByButton = true
                 showTab()
@@ -289,14 +332,11 @@ class MainActivity : Activity() {
             setTextColor(col(R.color.text))
             background = rounded(Color.TRANSPARENT, dp(5), dp(2), col(R.color.text))
             contentDescription = "탭 목록"
-            setOnClickListener { showTabs() }
-            setOnLongClickListener { newTab(null); true }
         }
         val tabsWrap = FrameLayout(this).apply {
-            val tv = TypedValue()
-            context.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true)
-            setBackgroundResource(tv.resourceId)
-            setOnClickListener { showTabs() }
+            ripple(this, borderless = true)
+            setOnClickListener { leaveAddress(); switcher.open() }
+            setOnLongClickListener { newTab(null); true }
             addView(tabsBtn, FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER))
         }
         val menuBtn = iconBtn(R.drawable.ic_menu, "메뉴") {}
@@ -310,7 +350,8 @@ class MainActivity : Activity() {
         root.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         root.addView(line())
         root.addView(bottom)
-        setContentView(root)
+        frame.addView(root, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        setContentView(frame)
     }
 
     /** 안드로이드 15(S24·폴드5)는 화면이 상태바 밑까지 그려지므로 여백을 직접 맞춘다 */
@@ -321,7 +362,7 @@ class MainActivity : Activity() {
             window.setDecorFitsSystemWindows(false)
             window.statusBarColor = Color.TRANSPARENT
             window.navigationBarColor = Color.TRANSPARENT
-            root.setOnApplyWindowInsetsListener { v, ins ->
+            frame.setOnApplyWindowInsetsListener { v, ins ->
                 val b = ins.getInsets(
                     WindowInsets.Type.systemBars() or WindowInsets.Type.ime() or WindowInsets.Type.displayCutout()
                 )
@@ -348,11 +389,18 @@ class MainActivity : Activity() {
         root.requestFocus()
     }
 
+    private fun goFromAddress() {
+        val q = address.text.toString().trim()
+        leaveAddress()
+        if (q.isNotEmpty()) load(q)
+    }
+
     private fun displayUrl(u: String) = u.removePrefix("https://").removePrefix("http://").removeSuffix("/")
 
     private fun updateUi() {
         val t = tabs.getOrNull(cur) ?: return
-        if (!address.hasFocus()) {
+        val typing = address.hasFocus()
+        if (!typing) {
             address.setText(if (t.home) "" else displayUrl(t.pendingUrl ?: t.webView.url ?: ""))
         }
         val canBack = if (t.home) t.homeByButton && t.webView.url != null
@@ -362,15 +410,93 @@ class MainActivity : Activity() {
         val canFwd = !t.home && t.webView.canGoForward()
         fwdBtn.isEnabled = canFwd
         fwdBtn.alpha = if (canFwd) 1f else 0.3f
-        reloadBtn.alpha = if (t.home) 0.3f else 1f
-        reloadBtn.setImageResource(if (loading && !t.home) R.drawable.ic_close else R.drawable.ic_refresh)
+
+        // 입력 중이면 오른쪽 버튼이 '이동'으로 바뀜
+        when {
+            typing -> {
+                reloadBtn.setImageResource(R.drawable.ic_go)
+                reloadBtn.alpha = 1f
+                reloadBtn.imageTintList = ColorStateList.valueOf(col(R.color.accent))
+            }
+            else -> {
+                reloadBtn.setImageResource(if (loading && !t.home) R.drawable.ic_close else R.drawable.ic_refresh)
+                reloadBtn.alpha = if (t.home) 0.3f else 1f
+                reloadBtn.imageTintList = ColorStateList.valueOf(col(R.color.text))
+            }
+        }
+        val url = t.webView.url
+        starBtn.visibility = if (typing || t.home || url == null || !url.startsWith("http")) View.GONE else View.VISIBLE
+        if (starBtn.visibility == View.VISIBLE) {
+            val on = dialIndex(url!!) >= 0
+            starBtn.setImageResource(if (on) R.drawable.ic_star else R.drawable.ic_star_border)
+            starBtn.imageTintList = ColorStateList.valueOf(col(if (on) R.color.accent else R.color.sub))
+        }
         tabsBtn.text = if (tabs.size > 99) ":D" else tabs.size.toString()
         if (t.home || !loading) progress.visibility = View.INVISIBLE
     }
 
+    // ================= 알림 막대 (하단) =================
+
+    private var snackView: View? = null
+    private var snackHide: Runnable? = null
+    private var snackDismissOnTouch = false
+
+    private fun showSnack(text: String, action: String?, ms: Long, dismissOnTouch: Boolean = false, onAction: (() -> Unit)? = null) {
+        hideSnack()
+        val v = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = rounded(col(R.color.snack), dp(12))
+            elevation = dp(8).toFloat()
+            setPadding(dp(16), dp(4), dp(6), dp(4))
+            minimumHeight = dp(50)
+            isClickable = true
+        }
+        v.addView(TextView(this).apply {
+            this.text = text
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        if (action != null) {
+            v.addView(TextView(this).apply {
+                this.text = action
+                textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(0xFFFF6B70.toInt())
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+                ripple(this)
+                setOnClickListener {
+                    hideSnack()
+                    onAction?.invoke()
+                }
+            })
+        }
+        val lp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM)
+        lp.setMargins(dp(12), 0, dp(12), dp(if (switcher.isOpen) 84 else 62))
+        frame.addView(v, lp)
+        v.alpha = 0f
+        v.translationY = dp(20).toFloat()
+        v.animate().alpha(1f).translationY(0f).setDuration(180).start()
+        snackView = v
+        snackDismissOnTouch = dismissOnTouch
+        val r = Runnable { hideSnack() }
+        snackHide = r
+        frame.postDelayed(r, ms)
+    }
+
+    private fun hideSnack() {
+        snackHide?.let { frame.removeCallbacks(it) }
+        snackHide = null
+        snackView?.let { frame.removeView(it) }
+        snackView = null
+        snackDismissOnTouch = false
+    }
+
     // ================= 탭 =================
 
-    private fun newTab(url: String?, select: Boolean = true, byLink: Boolean = false): Tab {
+    fun newTab(url: String?, select: Boolean = true, byLink: Boolean = false): Tab {
         val t = Tab(createWebView())
         t.openedByLink = byLink
         if (url != null) {
@@ -379,11 +505,57 @@ class MainActivity : Activity() {
         }
         tabs.add(t)
         if (select) {
+            captureCurrentTab()
             tabs.getOrNull(cur)?.webView?.onPause()
             cur = tabs.size - 1
             showTab()
+        } else {
+            updateUi()
         }
         return t
+    }
+
+    /** 길게 눌러 '새 탭에서 열기': 지금 탭 바로 옆에 뒤에서 열고, 10초간 '이동' 버튼 */
+    private fun openInBackground(url: String, from: Tab?) {
+        val t = Tab(createWebView())
+        t.home = false
+        t.openedByLink = true
+        t.opener = from
+        val at = (from?.let { tabs.indexOf(it) } ?: cur).coerceAtLeast(0) + 1
+        // 같은 탭에서 연달아 연 탭들은 순서대로 이어 붙임
+        var pos = at
+        while (pos < tabs.size && tabs[pos].opener === from && from != null) pos++
+        tabs.add(pos.coerceAtMost(tabs.size), t)
+        if (pos <= cur) cur++
+        t.webView.loadUrl(url)
+        updateUi()
+        showSnack("새 탭에서 열었어요", "새 탭으로 이동", 10_000, dismissOnTouch = true) {
+            if (t in tabs) selectTab(tabs.indexOf(t))
+        }
+    }
+
+    fun selectTab(i: Int) {
+        if (i !in tabs.indices) return
+        if (i != cur) {
+            captureCurrentTab()
+            tabs.getOrNull(cur)?.webView?.onPause()
+            cur = i
+        }
+        showTab()
+    }
+
+    fun moveTab(from: Int, to: Int) {
+        if (from !in tabs.indices || to !in tabs.indices) return
+        val current = tabs[cur]
+        val t = tabs.removeAt(from)
+        tabs.add(to, t)
+        cur = tabs.indexOf(current)
+    }
+
+    fun tabTitle(t: Tab): String {
+        if (t.home) return "새 탭"
+        val u = t.pendingUrl ?: t.webView.url ?: ""
+        return t.title.ifBlank { displayUrl(u) }.ifBlank { "로딩 중" }
     }
 
     private fun showTab() {
@@ -401,103 +573,85 @@ class MainActivity : Activity() {
                 t.webView.loadUrl(it)
             }
         }
-        loading = false
+        loading = t.webView.progress in 1..99 && !t.home
         updateUi()
     }
 
-    private fun closeTab(i: Int) {
-        if (i !in tabs.indices) return
+    /** 탭을 목록에서 빼기만 한다 (웹뷰는 그대로) */
+    private fun detachTab(i: Int): Tab {
         val wasCurrent = i == cur
         val t = tabs.removeAt(i)
         (t.webView.parent as? ViewGroup)?.removeView(t.webView)
-        t.webView.destroy()
-        tabs.forEach { if (it.opener === t) it.opener = null }
+        t.webView.onPause()
+        tabs.forEach { if (it.opener === t) it.opener = t.opener }
         if (tabs.isEmpty()) {
             cur = 0
             newTab(null)
-            return
+            return t
         }
         if (i < cur) cur--
         if (cur >= tabs.size) cur = tabs.size - 1
         if (wasCurrent) t.opener?.let { o -> tabs.indexOf(o).takeIf { it >= 0 }?.let { cur = it } }
         showTab()
+        return t
     }
 
-    private fun closeAll() {
-        tabs.forEach {
-            (it.webView.parent as? ViewGroup)?.removeView(it.webView)
-            it.webView.destroy()
-        }
-        tabs.clear()
-        cur = 0
-        newTab(null)
+    private fun closeTab(i: Int) {
+        if (i !in tabs.indices) return
+        detachTab(i).webView.destroy()
     }
 
-    private fun tabLabel(t: Tab): Pair<String, String> = when {
-        t.home -> Pair("새 탭", "")
-        else -> {
-            val u = t.pendingUrl ?: t.webView.url ?: ""
-            Pair(t.title.ifBlank { displayUrl(u) }, displayUrl(u))
-        }
+    // 닫은 탭 되살리기용 (탭, 원래 위치, 현재 탭이었는지)
+    private var closedTab: Triple<Tab, Int, Boolean>? = null
+    private var closedTimer: Runnable? = null
+
+    fun closeTabUndoable(i: Int) {
+        if (i !in tabs.indices) return
+        finalizeClosed()
+        val wasCurrent = i == cur
+        val t = detachTab(i)
+        closedTab = Triple(t, i, wasCurrent)
+        val r = Runnable { finalizeClosed() }
+        closedTimer = r
+        frame.postDelayed(r, 5_500)
+        showSnack("탭을 닫았어요", "되살리기", 5_000) { restoreClosed() }
     }
 
-    private fun showTabs() {
-        var dlg: AlertDialog? = null
-        val list = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+    private fun finalizeClosed() {
+        closedTimer?.let { frame.removeCallbacks(it) }
+        closedTimer = null
+        closedTab?.first?.webView?.destroy()
+        closedTab = null
+    }
+
+    private fun restoreClosed() {
+        val (t, i, wasCurrent) = closedTab ?: return
+        closedTimer?.let { frame.removeCallbacks(it) }
+        closedTimer = null
+        closedTab = null
+        // 마지막 탭을 닫아서 빈 새 탭이 자동으로 생겼다면 그건 치운다
+        if (tabs.size == 1 && tabs[0].home && tabs[0].webView.url == null) {
+            tabs[0].webView.destroy()
+            tabs.clear()
+            cur = 0
         }
-        tabs.forEachIndexed { i, t ->
-            val (title, sub) = tabLabel(t)
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(14), dp(10), dp(4), dp(10))
-                background = if (i == cur) rounded(Color.TRANSPARENT, dp(12), dp(2), col(R.color.accent))
-                else rounded(col(R.color.field), dp(12))
-                setOnClickListener {
-                    dlg?.dismiss()
-                    if (i != cur) {
-                        tab.webView.onPause()
-                        cur = i
-                        showTab()
-                    }
-                }
-            }
-            val texts = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                addView(TextView(context).apply {
-                    text = title
-                    textSize = 15f
-                    setTextColor(col(R.color.text))
-                    maxLines = 1
-                    ellipsize = TextUtils.TruncateAt.END
-                })
-                if (sub.isNotEmpty()) addView(TextView(context).apply {
-                    text = sub
-                    textSize = 12f
-                    setTextColor(col(R.color.sub))
-                    maxLines = 1
-                    ellipsize = TextUtils.TruncateAt.END
-                })
-            }
-            row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            row.addView(iconBtn(R.drawable.ic_close, "탭 닫기") {
-                dlg?.dismiss()
-                closeTab(i)
-                showTabs()
-            }, LinearLayout.LayoutParams(dp(40), dp(40)))
-            list.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                bottomMargin = dp(8)
-            })
-        }
-        dlg = AlertDialog.Builder(this)
-            .setTitle("열린 탭 ${tabs.size}개")
-            .setView(ScrollView(this).apply { addView(list) })
-            .setPositiveButton("새 탭") { _, _ -> newTab(null) }
-            .setNeutralButton("모두 닫기") { _, _ -> closeAll() }
-            .setNegativeButton("닫기", null)
-            .show()
+        val pos = i.coerceIn(0, tabs.size)
+        tabs.add(pos, t)
+        if (wasCurrent || tabs.size == 1) cur = pos
+        else if (pos <= cur) cur++
+        showTab()
+        switcher.refresh()
+    }
+
+    fun captureCurrentTab() {
+        val t = tabs.getOrNull(cur) ?: return
+        if (t.home) return
+        Thumbs.capture(t.webView, 0.45f)?.let { t.thumb = it }
+    }
+
+    private fun closeOverlays() {
+        if (switcher.isOpen) switcher.close()
+        pages.closeAll()
     }
 
     // ================= 이동 =================
@@ -540,7 +694,6 @@ class MainActivity : Activity() {
                 return true
             }
             if (i == 0 && isJunk(list.getItemAtIndex(0).url)) {
-                // 남은 기록이 전부 광고면 첫 화면으로
                 if (t.openedByLink && tabs.size > 1) closeTab(cur) else {
                     t.home = true; t.homeByButton = false; showTab()
                 }
@@ -566,6 +719,8 @@ class MainActivity : Activity() {
     override fun onBackPressed() {
         when {
             customView != null -> exitFullscreen()
+            pages.back() -> {}
+            switcher.isOpen -> switcher.close()
             address.hasFocus() -> leaveAddress()
             goBack() -> {}
             else -> moveTaskToBack(true)
@@ -598,6 +753,167 @@ class MainActivity : Activity() {
         }
     }
 
+    // ================= 길게 누르기 메뉴 =================
+
+    private fun onWebLongPress(wv: WebView): Boolean {
+        val hr = wv.hitTestResult
+        val type = hr.type
+        val extra = hr.extra
+        when (type) {
+            WebView.HitTestResult.SRC_ANCHOR_TYPE -> {
+                if (extra != null) linkMenu(wv, extra, null)
+                return extra != null
+            }
+            WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE, WebView.HitTestResult.IMAGE_TYPE -> {
+                val h = Handler(mainLooper) { m ->
+                    val link = m.data?.getString("url")?.takeIf { it.isNotBlank() }
+                    linkMenu(wv, if (type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE) link else link, extra)
+                    true
+                }
+                wv.requestFocusNodeHref(h.obtainMessage())
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun linkMenu(wv: WebView, link: String?, img: String?) {
+        val items = mutableListOf<Pair<String, () -> Unit>>()
+        if (link != null && !link.startsWith("javascript:")) {
+            items.add("새 탭에서 열기" to { openInBackground(link, findTab(wv)) })
+            items.add("링크 복사" to { copy(link) })
+            items.add("링크 공유" to { share(link) })
+        }
+        if (img != null) {
+            items.add("이미지 저장" to { saveImage(wv, img) })
+            if (img.startsWith("http")) items.add("이미지를 새 탭에서 보기" to { openInBackground(img, findTab(wv)) })
+        }
+        if (items.isEmpty()) return
+        val title = (link ?: img ?: "").let { if (it.startsWith("data:")) "이미지" else displayUrl(it) }
+        AlertDialog.Builder(this)
+            .setTitle(title.take(120))
+            .setItems(items.map { it.first }.toTypedArray()) { _, w -> items[w].second() }
+            .show()
+    }
+
+    private fun copy(s: String) {
+        (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("link", s))
+        if (Build.VERSION.SDK_INT < 33) toast("복사했어요")
+    }
+
+    private fun share(s: String) {
+        startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, s), "공유"))
+    }
+
+    private fun saveImage(wv: WebView, img: String) {
+        when {
+            img.startsWith("data:") -> { Downloads.startData(this, img, "image", null); dlStarted() }
+            img.startsWith("blob:") -> saveBlob(wv, img, "image")
+            else -> startDownload(img, wv.settings.userAgentString, null, null, wv.url)
+        }
+    }
+
+    // ================= 다운로드 =================
+
+    fun startDownload(url: String, ua: String?, cd: String?, mime: String?, referer: String?) {
+        Downloads.start(this, url, ua ?: WebSettings.getDefaultUserAgent(this), cd, mime, referer)
+        dlStarted()
+    }
+
+    private fun dlStarted() {
+        val name = Downloads.items.firstOrNull()?.name ?: ""
+        showSnack("다운로드 시작" + if (name.isNotEmpty() && name != "준비 중…") ": $name" else "", "보기", 4_000) {
+            pages.openDownloads()
+        }
+    }
+
+    private fun onDownloadFinished(it: Downloads.Item) {
+        when (it.state) {
+            Downloads.DONE -> showSnack("다운로드 완료: ${it.name}", "열기", 5_000) { openFile(it) }
+            Downloads.FAILED -> showSnack("다운로드 실패: ${it.name}", "보기", 5_000) { pages.openDownloads() }
+            else -> {}
+        }
+    }
+
+    fun openFile(it: Downloads.Item) {
+        val u = it.uri ?: return
+        try {
+            val i = Intent(Intent.ACTION_VIEW).setDataAndType(Uri.parse(u), it.mime ?: "*/*")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            startActivity(Intent.createChooser(i, it.name))
+        } catch (e: Exception) {
+            toast("이 파일을 열 앱이 없어요")
+        }
+    }
+
+    private fun onDownloadRequest(wv: WebView, url: String, ua: String?, cd: String?, mime: String?) {
+        when {
+            url.startsWith("data:") -> { Downloads.startData(this, url, Downloads.fileName("http://x/download", cd, mime), mime); dlStarted() }
+            url.startsWith("blob:") -> {
+                if (!store.unblockDownloads) {
+                    toast("사이트 안에서 만든 파일은 '다운로드 차단 해제'를 켜야 받을 수 있어요")
+                    return
+                }
+                saveBlob(wv, url, Downloads.fileName("http://x/download", cd, mime))
+            }
+            url.startsWith("http") -> startDownload(url, ua, cd, mime, wv.url)
+            else -> toast("이 형식의 다운로드는 지원하지 않아요")
+        }
+        // 다운로드만 하려고 열린 빈 새 탭은 닫는다
+        val t = findTab(wv)
+        if (t != null && t.openedByLink && t.webView.copyBackForwardList().size == 0 && tabs.size > 1) {
+            frame.post { if (t in tabs) closeTab(tabs.indexOf(t)) }
+        }
+    }
+
+    /** blob: 주소는 페이지 안에서만 읽을 수 있어서, 페이지에서 data로 바꿔 앱에 넘겨받는다 */
+    private fun saveBlob(wv: WebView, url: String, name: String) {
+        blobPending++
+        val js = "(function(){try{var x=new XMLHttpRequest();x.open('GET'," + JSONObject.quote(url) + ",true);" +
+            "x.responseType='blob';x.onload=function(){var r=new FileReader();r.onloadend=function(){" +
+            "__lbdl.save(r.result,x.response.type||''," + JSONObject.quote(name) + ");};r.readAsDataURL(x.response);};" +
+            "x.onerror=function(){__lbdl.fail();};x.send();}catch(e){__lbdl.fail();}})();"
+        wv.evaluateJavascript(js, null)
+    }
+
+    inner class DlBridge {
+        @JavascriptInterface
+        fun save(data: String, mime: String, name: String) {
+            runOnUiThread {
+                if (blobPending <= 0) return@runOnUiThread
+                blobPending--
+                Downloads.startData(this@MainActivity, data, name, mime.ifEmpty { null })
+                dlStarted()
+            }
+        }
+
+        @JavascriptInterface
+        fun fail() {
+            runOnUiThread {
+                if (blobPending > 0) blobPending--
+                toast("파일을 받지 못했어요")
+            }
+        }
+    }
+
+    fun pickDownloadFolder(done: () -> Unit) {
+        folderPicked = done
+        try {
+            @Suppress("DEPRECATION")
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_TREE)
+        } catch (e: Exception) {
+            toast("폴더 선택 화면을 열 수 없어요")
+        }
+    }
+
+    private val fileExt = Regex(
+        "\\.(apk|zip|rar|7z|alz|egg|tar|gz|pdf|hwp|hwpx|docx?|xlsx?|pptx?|txt|mp4|mkv|avi|mov|webm|mp3|flac|wav|m4a|exe|msi|dmg|iso|torrent|smi|srt|epub|cbz)$",
+        RegexOption.IGNORE_CASE
+    )
+
+    private fun looksLikeFile(url: String?): Boolean =
+        url != null && fileExt.containsMatchIn(Uri.parse(url).path ?: "")
+
     // ================= 웹뷰 =================
 
     private fun findTab(v: WebView?) = tabs.firstOrNull { it.webView === v }
@@ -608,13 +924,24 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 33) s.isAlgorithmicDarkeningAllowed = store.darkPages
     }
 
+    fun applyDarkAll() {
+        tabs.forEach { applyDark(it.webView.settings) }
+        if (!isNight()) toast("폰이 다크 모드일 때 적용돼요")
+    }
+
+    fun setAdblock(on: Boolean) {
+        adblock = on
+        store.adblock = on
+        tabs.getOrNull(cur)?.let { if (!it.home) it.webView.reload() }
+    }
+
     private fun setDesktop(t: Tab, on: Boolean) {
         t.desktop = on
         t.webView.settings.userAgentString = if (on) DESKTOP_UA else null
         if (!t.home) t.webView.reload()
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
+    @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
     private fun createWebView(): WebView = WebView(this).apply {
         setBackgroundColor(col(R.color.bar))
         settings.apply {
@@ -634,43 +961,28 @@ class MainActivity : Activity() {
         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
         webViewClient = Client()
         webChromeClient = Chrome()
-        setDownloadListener { url, ua, cd, mime, _ -> download(url, ua, cd, mime) }
-    }
-
-    private fun download(url: String, ua: String?, cd: String?, mime: String?) {
-        if (!url.startsWith("http")) {
-            toast("이 형식의 다운로드는 아직 지원하지 않아요")
-            return
-        }
-        try {
-            val name = URLUtil.guessFileName(url, cd, mime)
-            val req = DownloadManager.Request(Uri.parse(url)).apply {
-                if (mime != null) setMimeType(mime)
-                if (ua != null) addRequestHeader("User-Agent", ua)
-                CookieManager.getInstance().getCookie(url)?.let { addRequestHeader("Cookie", it) }
-                setTitle(name)
-                setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
-            }
-            (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(req)
-            toast("다운로드 시작: $name")
-        } catch (e: Exception) {
-            toast("다운로드를 시작하지 못했어요")
+        addJavascriptInterface(DlBridge(), "__lbdl")
+        setDownloadListener { url, ua, cd, mime, _ -> onDownloadRequest(this, url, ua, cd, mime) }
+        setOnLongClickListener { onWebLongPress(this) }
+        setOnTouchListener { _, e ->
+            if (e.actionMasked == MotionEvent.ACTION_DOWN && snackDismissOnTouch) hideSnack()
+            false
         }
     }
 
     inner class Client : WebViewClient() {
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
             val scheme = request.url.scheme?.lowercase() ?: return false
+            val url = request.url.toString()
             if (adblock && request.isForMainFrame && (scheme == "http" || scheme == "https") &&
-                AdBlock.blocked(request.url.host)
+                AdBlock.blocked(request.url.host) && !(store.unblockDownloads && looksLikeFile(url))
             ) {
                 // 링크를 눌렀는데 광고 페이지로 넘기려는 경우 → 이동 자체를 취소
                 dropAdPage(view)
                 return true
             }
             if (scheme in WEB_SCHEMES) return false
-            openExternal(view, request.url.toString())
+            openExternal(view, url)
             return true
         }
 
@@ -682,7 +994,9 @@ class MainActivity : Activity() {
         override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
             val t = findTab(view)
             if (t != null) t.dialogCount = 0
-            if (adblock && url != null && url != t?.allowUrl && AdBlock.blockedUrl(url)) {
+            if (adblock && url != null && url != t?.allowUrl && AdBlock.blockedUrl(url) &&
+                !(store.unblockDownloads && looksLikeFile(url))
+            ) {
                 view.stopLoading()
                 dropAdPage(view)
                 return
@@ -704,11 +1018,24 @@ class MainActivity : Activity() {
                 updateUi()
             }
             if (adblock) view.evaluateJavascript(AdBlock.hideScript(Uri.parse(url ?: "").host), null)
-            if (url != null && url.startsWith("http") && !AdBlock.blockedUrl(url)) store.addHistory(view.title ?: url, url)
+            if (url != null && url.startsWith("http") && !AdBlock.blockedUrl(url)) {
+                store.addHistory(view.title ?: url, url)
+                // 잠시 뒤 화면을 찍어 탭 미리보기·즐겨찾기 미리보기에 쓴다
+                view.postDelayed({ snapshot(view, url) }, 1500)
+            }
         }
 
         override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
             if (isCurrent(view)) updateUi()
+        }
+    }
+
+    private fun snapshot(view: WebView, url: String) {
+        if (!isCurrent(view) || view.url != url || switcher.isOpen) return
+        val t = findTab(view) ?: return
+        Thumbs.capture(view, 0.45f)?.let { t.thumb = it }
+        if (dialIndexByKey(url) >= 0 && !Thumbs.hasFresh(this, url, 3 * 3600_000L)) {
+            Thumbs.capture(view, 0.5f, Thumbs.DIAL_ASPECT)?.let { Thumbs.saveDial(this, url, it) }
         }
     }
 
@@ -730,9 +1057,11 @@ class MainActivity : Activity() {
             t.home = false
             t.openedByLink = true
             t.opener = findTab(view)
+            captureCurrentTab()
             tabs.getOrNull(cur)?.webView?.onPause()
-            tabs.add(t)
-            cur = tabs.size - 1
+            val at = (t.opener?.let { tabs.indexOf(it) } ?: cur) + 1
+            tabs.add(at.coerceIn(0, tabs.size), t)
+            cur = tabs.indexOf(t)
             showTab()
             val transport = resultMsg.obj as WebView.WebViewTransport
             transport.webView = t.webView
@@ -797,6 +1126,19 @@ class MainActivity : Activity() {
         if (requestCode == REQ_FILE) {
             fileCallback?.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data))
             fileCallback = null
+        } else if (requestCode == REQ_TREE) {
+            val uri = data?.data
+            if (resultCode == RESULT_OK && uri != null) {
+                try {
+                    contentResolver.takePersistableUriPermission(
+                        uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    )
+                } catch (e: Exception) {
+                }
+                store.downloadTree = uri.toString()
+                folderPicked?.invoke()
+            }
+            folderPicked = null
         }
     }
 
@@ -904,24 +1246,56 @@ class MainActivity : Activity() {
         }
     }
 
-    // ================= 첫 화면 =================
+    // ================= 즐겨찾기 =================
+
+    private fun norm(u: String) = u.removeSuffix("/").removePrefix("https://").removePrefix("http://").removePrefix("www.")
+
+    /** 이 주소와 같은 즐겨찾기 위치 (없으면 -1) */
+    private fun dialIndex(url: String): Int = store.dials().indexOfFirst { norm(it.url) == norm(url) }
+
+    /** 같은 사이트(첫 화면 미리보기용) 즐겨찾기 위치 */
+    private fun dialIndexByKey(url: String): Int {
+        val k = Thumbs.key(url)
+        return store.dials().indexOfFirst { Thumbs.key(it.url) == k }
+    }
+
+    private fun toggleStar() {
+        val t = tab
+        val url = t.webView.url ?: return
+        val l = store.dials()
+        val i = dialIndex(url)
+        if (i >= 0) {
+            l.removeAt(i)
+            store.saveDials(l)
+            showSnack("즐겨찾기에서 뺐어요", null, 2_500)
+        } else {
+            val title = t.title.ifBlank { displayUrl(url) }.take(30)
+            l.add(Store.Item(title, url))
+            store.saveDials(l)
+            Thumbs.capture(t.webView, 0.5f, Thumbs.DIAL_ASPECT)?.let { Thumbs.saveDial(this, url, it) }
+            showSnack("즐겨찾기에 추가했어요", "이름 바꾸기", 4_000) { editDial(store.dials().size - 1) }
+        }
+        updateUi()
+    }
 
     private val tileColors = intArrayOf(
-        0xFF03C75A.toInt(), 0xFF4285F4.toInt(), 0xFFFF0000.toInt(), 0xFF1E88E5.toInt(),
+        0xFF03C75A.toInt(), 0xFF4285F4.toInt(), 0xFFE53935.toInt(), 0xFF1E88E5.toInt(),
         0xFF00A495.toInt(), 0xFFE5262D.toInt(), 0xFF8E44AD.toInt(), 0xFFF39C12.toInt(),
     )
 
     private fun buildHome() {
         homeGrid.removeAllViews()
-        val cols = if (resources.configuration.screenWidthDp >= 600) 6 else 4
+        val cols = when {
+            resources.configuration.screenWidthDp >= 840 -> 6
+            resources.configuration.screenWidthDp >= 600 -> 5
+            else -> 3
+        }
         homeGrid.columnCount = cols
-        val width = (if (content.width > 0) content.width else resources.displayMetrics.widthPixels) - dp(32)
+        val width = (if (content.width > 0) content.width else resources.displayMetrics.widthPixels) - dp(20)
         val cell = width / cols
         val items = store.dials()
         items.forEachIndexed { i, d ->
-            val color = tileColors[d.url.hashCode().mod(tileColors.size)]
-            val letter = d.title.trim().take(1).ifEmpty { "?" }
-            homeGrid.addView(tile(letter, d.title, color, cell, false, { load(d.url) }) {
+            homeGrid.addView(dialTile(d, cell, { load(d.url) }) {
                 AlertDialog.Builder(this)
                     .setTitle(d.title)
                     .setItems(arrayOf("새 탭에서 열기", "수정", "삭제")) { _, which ->
@@ -929,48 +1303,70 @@ class MainActivity : Activity() {
                             0 -> newTab(d.url)
                             1 -> editDial(i)
                             2 -> {
-                                val l = store.dials(); l.removeAt(i); store.saveDials(l); buildHome()
+                                val l = store.dials(); l.removeAt(i); store.saveDials(l)
+                                if (dialIndexByKey(d.url) < 0) Thumbs.forget(this, d.url)
+                                buildHome()
                             }
                         }
                     }.show()
             })
         }
-        homeGrid.addView(tile("+", "추가", col(R.color.field), cell, true, { editDial(-1) }, null))
+        homeGrid.addView(dialTile(null, cell, { editDial(-1) }, null))
     }
 
-    private fun tile(
-        letter: String, label: String, color: Int, cell: Int, plus: Boolean,
-        onClick: () -> Unit, onLong: (() -> Unit)?
-    ): View = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        gravity = Gravity.CENTER_HORIZONTAL
-        setPadding(0, dp(6), 0, dp(14))
-        val tv = TypedValue()
-        context.theme.resolveAttribute(android.R.attr.selectableItemBackground, tv, true)
-        setBackgroundResource(tv.resourceId)
-        addView(TextView(context).apply {
-            text = letter
-            gravity = Gravity.CENTER
-            textSize = 20f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(if (plus) col(R.color.sub) else Color.WHITE)
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(color)
+    /** 큰 네모 미리보기 카드 (d = null 이면 '추가' 카드) */
+    private fun dialTile(d: Store.Item?, cell: Int, onClick: () -> Unit, onLong: (() -> Unit)?): View {
+        val cw = cell - dp(12)
+        val ch = (cw * Thumbs.DIAL_ASPECT).toInt()
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, dp(4), 0, dp(14))
+            layoutParams = GridLayout.LayoutParams().apply { width = cell }
+        }
+        val card = FrameLayout(this).apply {
+            background = rounded(col(R.color.field), dp(12), 1, col(R.color.line))
+            outlineProvider = ViewOutlineProvider.BACKGROUND
+            clipToOutline = true
+            elevation = dp(2).toFloat()
+            foreground = TypedValue().let { tv ->
+                theme.resolveAttribute(android.R.attr.selectableItemBackground, tv, true)
+                getDrawable(tv.resourceId)
             }
-        }, LinearLayout.LayoutParams(dp(52), dp(52)))
-        addView(TextView(context).apply {
-            text = label
-            textSize = 12f
+            setOnClickListener { onClick() }
+            if (onLong != null) setOnLongClickListener { onLong(); true }
+        }
+        val thumb = d?.let { Thumbs.dial(this, it.url) }
+        when {
+            d == null -> card.addView(ImageView(this).apply {
+                setImageResource(R.drawable.ic_add)
+                imageTintList = ColorStateList.valueOf(col(R.color.sub))
+                scaleType = ImageView.ScaleType.CENTER
+            })
+            thumb != null -> card.addView(ImageView(this).apply {
+                setImageBitmap(thumb)
+                scaleType = ImageView.ScaleType.CENTER_CROP
+            })
+            else -> card.addView(TextView(this).apply {
+                text = d.title.trim().take(1).ifEmpty { "?" }
+                gravity = Gravity.CENTER
+                textSize = 34f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.WHITE)
+                setBackgroundColor(tileColors[d.url.hashCode().mod(tileColors.size)])
+            })
+        }
+        box.addView(card, LinearLayout.LayoutParams(cw, ch))
+        box.addView(TextView(this).apply {
+            text = d?.title ?: "추가"
+            textSize = 13f
             gravity = Gravity.CENTER
-            setTextColor(col(R.color.text))
+            setTextColor(col(if (d == null) R.color.sub else R.color.text))
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
             setPadding(dp(4), dp(6), dp(4), 0)
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        setOnClickListener { onClick() }
-        if (onLong != null) setOnLongClickListener { onLong(); true }
-        layoutParams = GridLayout.LayoutParams().apply { width = cell }
+        }, LinearLayout.LayoutParams(cw, ViewGroup.LayoutParams.WRAP_CONTENT))
+        return box
     }
 
     /** index = -1 이면 새로 추가 */
@@ -1006,7 +1402,7 @@ class MainActivity : Activity() {
                 if (index in l.indices) l[index] = Store.Item(t, u) else l.add(Store.Item(t, u))
                 store.saveDials(l)
                 if (tab.home) buildHome()
-                toast("저장했어요")
+                updateUi()
             }
             .setNegativeButton("취소", null)
             .show()
@@ -1015,17 +1411,21 @@ class MainActivity : Activity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         if (tabs.isNotEmpty() && tab.home) content.post { buildHome() }
+        if (switcher.isOpen) {
+            switcher.close()
+            frame.post { switcher.open() }
+        }
     }
 
     // ================= 차단 우회 =================
 
     /** 켜면 웹뷰의 모든 접속을 앱 내부 중계기(Bypass)로 돌린다 */
-    private fun applyBypass(on: Boolean, reload: Boolean) {
+    fun applyBypass(on: Boolean, reload: Boolean) {
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
             toast("이 폰의 웹뷰는 우회 기능을 지원하지 않아요. 플레이스토어에서 Android System WebView를 업데이트해 주세요")
             return
         }
-        val main = android.os.Handler(mainLooper)
+        val main = Handler(mainLooper)
         val exec = java.util.concurrent.Executor { main.post(it) }
         val done = Runnable {
             if (reload) tabs.getOrNull(cur)?.let { if (!it.home) it.webView.reload() }
@@ -1051,63 +1451,29 @@ class MainActivity : Activity() {
         val pm = PopupMenu(this, anchor)
         val m = pm.menu
         m.add(0, 1, 0, "새 탭")
-        m.add(0, 2, 0, "즐겨찾기에 추가")
+        m.add(0, 4, 0, "다운로드")
         m.add(0, 3, 0, "방문 기록")
-        m.add(0, 4, 0, "다운로드 목록")
         m.add(0, 5, 0, "페이지 공유")
-        m.add(0, 10, 0, "차단 우회 (보안 DNS)").apply { isCheckable = true; isChecked = store.bypass }
         m.add(0, 6, 0, "데스크톱 모드").apply { isCheckable = true; isChecked = t.desktop }
-        m.add(0, 7, 0, "광고 차단").apply { isCheckable = true; isChecked = adblock }
-        m.add(0, 8, 0, "다크 모드일 때 웹페이지도 어둡게").apply { isCheckable = true; isChecked = store.darkPages }
-        m.add(0, 9, 0, "검색 엔진: ${Store.ENGINES[store.engine]}")
+        m.add(0, 9, 0, "설정")
         pm.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 1 -> newTab(null)
-                2 -> if (t.home) editDial(-1)
-                else editDial(-1, t.title, t.webView.url ?: "")
                 3 -> showHistory()
-                4 -> try {
-                    startActivity(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS))
-                } catch (e: Exception) {
-                    toast("다운로드 목록을 열 수 없어요")
-                }
+                4 -> pages.openDownloads()
                 5 -> {
                     val u = t.webView.url
-                    if (t.home || u == null) toast("공유할 페이지가 없어요")
-                    else startActivity(Intent.createChooser(
-                        Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, u), "공유"
-                    ))
+                    if (t.home || u == null) toast("공유할 페이지가 없어요") else share(u)
                 }
                 6 -> setDesktop(t, !t.desktop)
-                7 -> {
-                    adblock = !adblock
-                    store.adblock = adblock
-                    toast(if (adblock) "광고 차단 켬" else "광고 차단 끔")
-                    if (!t.home) t.webView.reload()
-                }
-                8 -> {
-                    store.darkPages = !store.darkPages
-                    tabs.forEach { applyDark(it.webView.settings) }
-                    if (!isNight()) toast("폰이 다크 모드일 때 적용돼요")
-                }
-                10 -> {
-                    store.bypass = !store.bypass
-                    applyBypass(store.bypass, reload = true)
-                    toast(if (store.bypass) "차단 우회 켬" else "차단 우회 끔")
-                }
-                9 -> AlertDialog.Builder(this)
-                    .setTitle("검색 엔진")
-                    .setSingleChoiceItems(Store.ENGINES, store.engine) { d, which ->
-                        store.engine = which
-                        d.dismiss()
-                    }.show()
+                9 -> pages.openSettings()
             }
             true
         }
         pm.show()
     }
 
-    private fun showHistory() {
+    fun showHistory() {
         val list = store.history()
         if (list.isEmpty()) {
             toast("방문 기록이 없어요")
@@ -1117,6 +1483,7 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("방문 기록")
             .setItems(shown.map { "${it.title}\n${displayUrl(it.url)}" }.toTypedArray()) { _, which ->
+                closeOverlays()
                 load(shown[which].url)
             }
             .setNeutralButton("기록 지우기") { _, _ ->
@@ -1131,6 +1498,7 @@ class MainActivity : Activity() {
     companion object {
         private const val HOME = "about:home"
         private const val REQ_FILE = 7
+        private const val REQ_TREE = 8
         private val WEB_SCHEMES = setOf("http", "https", "about", "data", "blob", "javascript", "file")
         private const val DESKTOP_UA =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"

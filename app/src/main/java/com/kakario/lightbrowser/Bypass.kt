@@ -47,6 +47,9 @@ object Bypass {
         return s.localPort
     }
 
+    /** 중계기가 켜져 있으면 포트 번호 */
+    fun port(): Int? = server?.takeIf { !it.isClosed }?.localPort
+
     @Synchronized
     fun stop() {
         try {

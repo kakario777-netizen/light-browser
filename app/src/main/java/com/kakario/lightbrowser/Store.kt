@@ -68,6 +68,16 @@ class Store(ctx: Context) {
         get() = p.getBoolean("bypass", false)
         set(v) = p.edit().putBoolean("bypass", v).apply()
 
+    /** 광고 차단에 걸려도 파일 다운로드는 허용 */
+    var unblockDownloads: Boolean
+        get() = p.getBoolean("unblockDl", true)
+        set(v) = p.edit().putBoolean("unblockDl", v).apply()
+
+    /** 다운로드 폴더 (null = 기본 Download 폴더) */
+    var downloadTree: String?
+        get() = p.getString("dlTree", null)
+        set(v) = p.edit().putString("dlTree", v).apply()
+
     var darkPages: Boolean
         get() = p.getBoolean("darkPages", true)
         set(v) = p.edit().putBoolean("darkPages", v).apply()

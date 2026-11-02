@@ -1,0 +1,8 @@
+<resources>
+    <color name="bar">#1C1C1E</color>
+    <color name="text">#EEEEEE</color>
+    <color name="sub">#9A9A9A</color>
+    <color name="field">#2C2C2E</color>
+    <color name="line">#333336</color>
+    <color name="accent">#FF5A5F</color>
+</resources>

@@ -1,0 +1,53 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+
+      - name: Build debug APK
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon 2>&1 | tee build.log
+        # 빌드가 실패하면 오류 줄만 골라 요약 표시(annotation)로 남긴다 — 채팅에서 원인을 바로 볼 수 있게
+      - name: Report build errors
+        if: failure()
+        run: |
+          grep -E "^e: |error:|What went wrong|FAILURE|Unresolved|Exception" build.log | head -60 > errors.txt || true
+          msg=$(sed 's/%/%25/g' errors.txt | sed ':a;N;$!ba;s/\n/%0A/g')
+          echo "::error title=build-errors::${msg}"
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk light-browser.apk
+
+      - name: Publish to Releases (latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest light-browser.apk \
+            --title "최신 빌드 #${{ github.run_number }}" \
+            --notes "커밋: ${{ github.sha }} — 폰에서 light-browser.apk를 눌러 받아 설치하세요." \
+            --target ${{ github.sha }}

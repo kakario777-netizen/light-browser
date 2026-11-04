@@ -74,6 +74,10 @@ object BgWork {
                 if (t > 0) { max = 1000; prog = (files.sumOf { it.done } * 1000 / t).toInt() }
             }
         }
+        if (ModelStore.heavyDownloading) {
+            parts.add("번역 고급 모델 받는 중 ${ModelStore.heavyPercent()}%")
+            if (max == 0) { max = 100; prog = ModelStore.heavyPercent() }
+        }
         return Triple(parts.joinToString(" · "), prog, max)
     }
 
@@ -93,7 +97,7 @@ object BgWork {
     }
 
     private fun anyActive() = collectJobs > 0 || JobStore.jobs.any { it.active } ||
-        Downloads.items.any { it.state == Downloads.RUNNING }
+        Downloads.items.any { it.state == Downloads.RUNNING } || ModelStore.heavyDownloading
 
     /** 작업 상태가 바뀔 때마다 부름: 진행 중인 게 있으면 서비스 유지·알림 갱신, 없으면 정리 */
     @SuppressLint("MissingPermission")

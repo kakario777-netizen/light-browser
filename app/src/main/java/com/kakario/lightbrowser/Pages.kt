@@ -34,6 +34,10 @@ class Pages(private val a: MainActivity) {
             downloadsBody = null
             Downloads.onChange = null
         }
+        if (v.tag == "advanced") {
+            ModelStore.listeners.remove(modelListener)
+            modelListener = {}
+        }
         return true
     }
 
@@ -218,6 +222,134 @@ class Pages(private val a: MainActivity) {
 
         section(body, "기록")
         row(body, "방문 기록", null, null) { a.showHistory() }
+
+        section(body, "그 밖에")
+        row(body, "자세한 설정", "실시간 만화 번역 모델 고르기·받기", null) { openAdvanced() }
+    }
+
+    // ================= 자세한 설정 =================
+
+    private var modelListener: () -> Unit = {}
+
+    fun openAdvanced() {
+        val box = page("자세한 설정", "advanced")
+        val body = LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, a.dp(24))
+        }
+        box.addView(ScrollView(a).apply { addView(body) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        val st = a.store
+
+        section(body, "실시간 만화 번역")
+        row(body, "인식 언어", "일본어 → 한국어\n(영어·중국어·스페인어는 다음에 추가)", null, null)
+
+        section(body, "일본 만화 번역에 쓸 모델")
+        var lightPick: TextView? = null
+        var heavyPick: TextView? = null
+        fun mark() {
+            lightPick?.text = if (st.transModel == 0) "●" else "○"
+            heavyPick?.text = if (st.transModel == 1) "●" else "○"
+        }
+        fun pickMark() = TextView(a).apply {
+            textSize = 20f
+            setTextColor(a.getColor(R.color.accent))
+            setPadding(a.dp(12), 0, a.dp(4), 0)
+        }
+        lightPick = pickMark()
+        heavyPick = pickMark()
+        row(body, "일반 모델 (가벼움)", "구글 ML Kit · ${ModelStore.LIGHT_SIZE} · 빠름 · 뜻은 통하지만 말투가 어색할 수 있어요", lightPick) {
+            st.transModel = 0
+            mark()
+            a.live.modelChanged()
+        }
+        row(body, "고급 모델 (무거움)", "Qwen2.5 1.5B · ${ModelStore.HEAVY_SIZE} · 더 자연스러움 · 한 페이지에 몇 초 걸려요", heavyPick) {
+            if (!ModelStore.heavyReady(a)) {
+                AlertDialog.Builder(a)
+                    .setMessage("고급 모델을 아직 받지 않았어요. 아래 '고급 모델 받기'에서 먼저 받아 주세요 (${ModelStore.HEAVY_SIZE}).")
+                    .setPositiveButton("확인", null).show()
+                return@row
+            }
+            st.transModel = 1
+            mark()
+            a.live.modelChanged()
+        }
+        mark()
+
+        section(body, "모델 받기 · 지우기")
+        var lightSub: TextView? = null
+        lightSub = row(body, "일반 모델", "확인 중…", null) {
+            ModelStore.lightReady { ok ->
+                if (ok) {
+                    AlertDialog.Builder(a).setMessage("일반 모델을 지울까요? 실시간 번역을 다시 켜면 다시 받아요.")
+                        .setPositiveButton("지우기") { _, _ ->
+                            ModelStore.deleteLight { lightSub?.text = "안 받음 · ${ModelStore.LIGHT_SIZE}" }
+                        }.setNegativeButton("취소", null).show()
+                } else {
+                    lightSub?.text = "받는 중…"
+                    ModelStore.downloadLight { done, err ->
+                        lightSub?.text = if (done) "받음 · 눌러서 지우기" else "받기 실패: ${err ?: ""}"
+                    }
+                }
+            }
+        }
+        ModelStore.lightReady { ok -> lightSub?.text = if (ok) "받음 · 눌러서 지우기" else "안 받음 · ${ModelStore.LIGHT_SIZE} · 눌러서 받기" }
+
+        var heavySub: TextView? = null
+        val heavyBar = ProgressBar(a, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            progressTintList = ColorStateList.valueOf(a.getColor(R.color.accent))
+            visibility = View.GONE
+        }
+        fun heavyText() {
+            val part = ModelStore.heavyPartialSize(a)
+            heavySub?.text = when {
+                ModelStore.heavyDownloading ->
+                    "받는 중 ${ModelStore.heavyPercent()}% · ${Downloads.size(ModelStore.heavyDone)}" +
+                        (if (ModelStore.heavyTotal > 0) " / ${Downloads.size(ModelStore.heavyTotal)}" else "") + " · 눌러서 멈추기"
+                ModelStore.heavyReady(a) -> "받음 · ${Downloads.size(ModelStore.heavyFile(a).length())} · 눌러서 지우기"
+                ModelStore.heavyError != null -> ModelStore.heavyError!!
+                part > 0 -> "받다 멈춤 · ${Downloads.size(part)} · 눌러서 이어받기"
+                else -> "안 받음 · ${ModelStore.HEAVY_SIZE} · 눌러서 받기 (와이파이 권장)"
+            }
+            heavyBar.visibility = if (ModelStore.heavyDownloading) View.VISIBLE else View.GONE
+            heavyBar.progress = ModelStore.heavyPercent()
+        }
+        heavySub = row(body, "고급 모델", "", null) {
+            when {
+                ModelStore.heavyDownloading -> ModelStore.cancelHeavy()
+                ModelStore.heavyReady(a) -> AlertDialog.Builder(a)
+                    .setMessage("고급 모델(${Downloads.size(ModelStore.heavyFile(a).length())})을 지울까요?")
+                    .setPositiveButton("지우기") { _, _ ->
+                        ModelStore.deleteHeavy(a)
+                        if (st.transModel == 1) { st.transModel = 0; mark(); a.live.modelChanged() }
+                        heavyText()
+                    }.setNegativeButton("취소", null).show()
+                else -> AlertDialog.Builder(a)
+                    .setTitle("고급 모델 받기")
+                    .setMessage("${ModelStore.HEAVY_SIZE}를 받아요. 와이파이에서 받는 걸 권해요.\n받는 동안 다른 걸 해도 되고, 끊기면 이어서 받아요.")
+                    .setPositiveButton("받기") { _, _ ->
+                        a.askBackgroundPermissions()
+                        ModelStore.onHeavyDone = { ok ->
+                            if (ok) {
+                                a.toastMsg("고급 모델을 다 받았어요")
+                                if (st.transModel != 1) {
+                                    AlertDialog.Builder(a).setMessage("고급 모델을 지금부터 쓸까요?")
+                                        .setPositiveButton("쓰기") { _, _ -> st.transModel = 1; mark(); a.live.modelChanged() }
+                                        .setNegativeButton("나중에", null).show()
+                                }
+                            }
+                        }
+                        ModelStore.downloadHeavy(a)
+                    }.setNegativeButton("취소", null).show()
+            }
+        }
+        body.addView(heavyBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, a.dp(6)).apply {
+            leftMargin = a.dp(20); rightMargin = a.dp(20); bottomMargin = a.dp(8)
+        })
+        heavyText()
+        modelListener = { heavyText() }
+        ModelStore.listeners.add(modelListener)
     }
 
     private fun folderName(tree: String?): String {

@@ -6,7 +6,7 @@ import org.json.JSONObject
 
 /** 즐겨찾기·방문 기록·설정·열린 탭을 폰에 저장한다. */
 class Store(ctx: Context) {
-    data class Item(val title: String, val url: String)
+    data class Item(val title: String, val url: String, val time: Long = 0)
 
     private val p = ctx.getSharedPreferences("browser", Context.MODE_PRIVATE)
 
@@ -16,7 +16,7 @@ class Store(ctx: Context) {
             val a = JSONArray(s)
             MutableList(a.length()) { i ->
                 val o = a.getJSONObject(i)
-                Item(o.optString("t"), o.optString("u"))
+                Item(o.optString("t"), o.optString("u"), o.optLong("d", 0))
             }
         } catch (e: Exception) {
             null
@@ -25,7 +25,11 @@ class Store(ctx: Context) {
 
     private fun write(key: String, list: List<Item>) {
         val a = JSONArray()
-        list.forEach { a.put(JSONObject().put("t", it.title).put("u", it.url)) }
+        list.forEach {
+            val o = JSONObject().put("t", it.title).put("u", it.url)
+            if (it.time > 0) o.put("d", it.time)
+            a.put(o)
+        }
         p.edit().putString(key, a.toString()).apply()
     }
 
@@ -47,9 +51,15 @@ class Store(ctx: Context) {
     fun addHistory(title: String, url: String) {
         val list = history()
         list.removeAll { it.url == url }
-        list.add(0, Item(title.ifBlank { url }, url))
-        while (list.size > 300) list.removeAt(list.size - 1)
+        list.add(0, Item(title.ifBlank { url }, url, System.currentTimeMillis()))
+        while (list.size > 1000) list.removeAt(list.size - 1)
         write("history", list)
+    }
+
+    /** 고른 기록만 지우기 (주소+시간으로 구분) */
+    fun removeHistory(items: Collection<Item>) {
+        val keys = items.map { it.url + "|" + it.time }.toHashSet()
+        write("history", history().filter { (it.url + "|" + it.time) !in keys })
     }
 
     fun clearHistory() = p.edit().remove("history").apply()
@@ -87,6 +97,11 @@ class Store(ctx: Context) {
     var autoZip: Int
         get() = p.getInt("autoZip", 0)
         set(v) = p.edit().putInt("autoZip", v).apply()
+
+    /** 만화 번역 모델: 0 = 일반(가벼움), 1 = 고급(무거움) */
+    var transModel: Int
+        get() = p.getInt("transModel", 0)
+        set(v) = p.edit().putInt("transModel", v).apply()
 
     var askedOverlay: Boolean
         get() = p.getBoolean("askedOverlay", false)

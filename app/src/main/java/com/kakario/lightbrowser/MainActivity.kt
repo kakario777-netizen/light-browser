@@ -103,6 +103,8 @@ class MainActivity : Activity() {
     private lateinit var switcher: TabSwitcher
     private lateinit var pages: Pages
     private lateinit var grabber: Grabber
+    private lateinit var history: HistoryPage
+    lateinit var live: LiveTranslate
     private lateinit var collector: Collector
     private var lastTouchX = 0f
     private var lastTouchY = 0f
@@ -138,6 +140,8 @@ class MainActivity : Activity() {
         mini = MiniWindow(this)
         collector = Collector(this)
         grabber = Grabber(this)
+        history = HistoryPage(this)
+        live = LiveTranslate(this)
         JobStore.listeners.add(jobsListener)
         Downloads.onActivity = { onJobsChanged() }
         JobStore.onFinished = { j -> onGrabFinished(j) }
@@ -728,6 +732,7 @@ class MainActivity : Activity() {
         loading = t.webView.progress in 1..99 && !t.home
         updateUi()
         if (::collector.isInitialized) collector.refreshBar()
+        if (::live.isInitialized) live.onTabChanged()
     }
 
     /** 탭을 목록에서 빼기만 한다 (웹뷰는 그대로) */
@@ -808,7 +813,13 @@ class MainActivity : Activity() {
     }
 
     /** 웹페이지 위를 덮는 화면(탭 목록·설정·이미지 화면 등)이 없는지 */
-    private fun pageClearlyVisible() = isShown && !switcher.isOpen && !pages.isOpen && !grabber.isOpen
+    /** 실시간 번역용: 웹페이지가 다른 화면에 가리지 않고 보이는지 */
+    fun canSeePage() = pageClearlyVisible()
+
+    fun contentView(): FrameLayout = content
+
+    private fun pageClearlyVisible() = isShown && !switcher.isOpen && !pages.isOpen && !grabber.isOpen &&
+        !(::history.isInitialized && history.isOpen)
 
     private fun closeOverlays() {
         if (switcher.isOpen) switcher.close()
@@ -817,6 +828,7 @@ class MainActivity : Activity() {
             grabber.closeView()
             grabber.closeList()
         }
+        if (::history.isInitialized) history.close()
     }
 
     // ================= 이동 =================
@@ -885,6 +897,7 @@ class MainActivity : Activity() {
         when {
             customView != null -> exitFullscreen()
             collector.back() -> {}
+            history.back() -> {}
             grabber.back() -> {}
             pages.back() -> {}
             switcher.isOpen -> switcher.close()
@@ -958,8 +971,6 @@ class MainActivity : Activity() {
         if (img != null) {
             items.add("이미지 저장" to { saveImage(wv, img) })
             if (img.startsWith("http")) {
-                items.add("이 이미지 폴더 전체 받기" to { grabber.start(img, wv.url, wv.settings.userAgentString) })
-                items.add("주소 분석해서 찾기" to { grabber.analyze(img, wv.url, wv.settings.userAgentString) })
                 items.add("이미지를 새 탭에서 보기" to { openInBackground(img, findTab(wv)) })
             }
         }
@@ -1148,6 +1159,7 @@ class MainActivity : Activity() {
         addJavascriptInterface(DlBridge(), "__lbdl")
         setDownloadListener { url, ua, cd, mime, _ -> onDownloadRequest(this, url, ua, cd, mime) }
         setOnLongClickListener { onWebLongPress(this) }
+        setOnScrollChangeListener { _, _, _, _, _ -> if (::live.isInitialized) live.onScroll(this) }
         setOnTouchListener { _, e ->
             if (e.actionMasked == MotionEvent.ACTION_DOWN) {
                 lastTouchX = e.x
@@ -1210,6 +1222,7 @@ class MainActivity : Activity() {
             if (adblock) view.evaluateJavascript(AdBlock.hideScript(Uri.parse(url ?: "").host), null)
             if (url != null && url.startsWith("http") && !AdBlock.blockedUrl(url)) {
                 store.addHistory(view.title ?: url, url)
+                if (::live.isInitialized) live.onPageChanged(view)
                 // 잠시 뒤 화면을 찍어 탭 미리보기·즐겨찾기 미리보기에 쓴다
                 view.postDelayed({ snapshot(view, url) }, 1500)
             }
@@ -1647,6 +1660,7 @@ class MainActivity : Activity() {
         m.add(0, 6, 0, "데스크톱 모드").apply { isCheckable = true; isChecked = t.desktop }
         m.add(0, 11, 0, "이미지 폴더 받기")
         m.add(0, 12, 0, "페이지 넘기며 이미지 모으기")
+        m.add(0, 13, 0, "실시간 번역 (일본어 → 한국어)").apply { isCheckable = true; isChecked = live.isOn }
         m.add(0, 9, 0, "설정")
         pm.setOnMenuItemClickListener { item ->
             when (item.itemId) {
@@ -1661,6 +1675,7 @@ class MainActivity : Activity() {
                 9 -> pages.openSettings()
                 11 -> grabFromPage(t)
                 12 -> startCollector()
+                13 -> live.toggle()
             }
             true
         }
@@ -1845,25 +1860,19 @@ class MainActivity : Activity() {
     }
 
     fun showHistory() {
-        val list = store.history()
-        if (list.isEmpty()) {
-            toast("방문 기록이 없어요")
-            return
-        }
-        val shown = list.take(150)
-        AlertDialog.Builder(this)
-            .setTitle("방문 기록")
-            .setItems(shown.map { "${it.title}\n${displayUrl(it.url)}" }.toTypedArray()) { _, which ->
-                closeOverlays()
-                load(shown[which].url)
-            }
-            .setNeutralButton("기록 지우기") { _, _ ->
-                store.clearHistory()
-                tabs.forEach { it.webView.clearHistory() }
-                toast("방문 기록을 지웠어요")
-            }
-            .setNegativeButton("닫기", null)
-            .show()
+        closeOverlays()
+        history.open()
+    }
+
+    /** 방문 기록 화면 등에서 주소 열기 */
+    fun openUrl(url: String) {
+        closeOverlays()
+        load(url)
+    }
+
+    fun clearAllHistory() {
+        store.clearHistory()
+        tabs.forEach { it.webView.clearHistory() }
     }
 
     companion object {

@@ -60,7 +60,7 @@ object BgWork {
         if (collectJobs > 0) parts.add("넘기며 모으는 중 ${collectJobs}개 (${collectImages}장)")
         val finding = JobStore.jobs.count { it.state == GrabJob.FINDING }
         if (finding > 0) parts.add("이미지 찾는 중 ${finding}개")
-        val dl = JobStore.jobs.filter { it.state == GrabJob.DOWNLOADING }
+        val dl = JobStore.jobs.filter { it.state == GrabJob.DOWNLOADING || it.state == GrabJob.COLLECTING }
         if (dl.isNotEmpty()) {
             prog = dl.sumOf { it.done }
             max = dl.sumOf { it.total }
@@ -147,6 +147,13 @@ object BgWork {
     }
 
     fun clearJob(ctx: Context, jobId: Long) = nm(ctx).cancel(noteId(jobId))
+
+    /** 넘기며 모으기가 더 넘어가지 않아 멈췄을 때 (앱을 보고 있지 않을 때만) */
+    fun collectPaused(ctx: Context, title: String, count: Int) {
+        val code = 300000 + (title.hashCode() and 0xffff)
+        doneNote(ctx, code, "넘기며 모으기 멈춤", "$title · ${count}장에서 더 넘어가지 않아요. 눌러서 이어 넘기거나 끝내세요",
+            openApp(ctx, code) { it.putExtra(EXTRA_JOBS, true) })
+    }
 
     /** 파일 다운로드 완료 알림 */
     fun fileDone(ctx: Context, it: Downloads.Item) {

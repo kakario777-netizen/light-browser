@@ -14,7 +14,6 @@ import java.net.URI
 import java.net.URL
 import java.net.URLDecoder
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicInteger
 
 /** 이미지 받기 작업 하나 (폴더 받기·번호 찾기·넘기며 모으기 결과) */
 class GrabJob(val id: Long, var title: String, val dir: File, val referer: String?, val ua: String?) {
@@ -29,11 +28,23 @@ class GrabJob(val id: Long, var title: String, val dir: File, val referer: Strin
     var baseImage: String? = null   // 기준 이미지 (못 찾았을 때 주소 분석용)
     var seen = false                // 완료 후 사용자가 열어 봤는지
     val pics = mutableListOf<Pic>() // 메인 스레드에서만
-    internal var slots: Array<Pic?> = emptyArray()
+    internal val slots = ArrayList<Pic?>()          // 메인 스레드에서만 (주소 순서대로)
+    internal val failed = sortedSetOf<Int>()        // 실패한 순번 (메인 스레드)
+    internal val failCodes = HashMap<Int, Int>()    // 실패 이유별 개수 (메인 스레드)
+    /** 페이지가 그 이미지를 불러올 때 보낸 요청 머리말 (같은 조건으로 받기 위해) */
+    val headers = java.util.concurrent.ConcurrentHashMap<String, Map<String, String>>()
+    /** 페이지가 이미지를 불러올 때 앱이 같이 받아 둔 파일 (다시 요청하지 않고 그대로 씀) */
+    val captured = java.util.concurrent.ConcurrentHashMap<String, File>()
+    internal val failReason = HashMap<Int, Int>()   // 순번별 실패 이유 (메인 스레드)
 
     class Pic(val url: String, val file: File, var selected: Boolean = true)
 
-    val active get() = state == FINDING || state == DOWNLOADING
+    val active get() = state == FINDING || state == DOWNLOADING || state == COLLECTING
+
+    /** "403 접근 거부 12 · 연결 오류 3" 같은 실패 이유 요약 */
+    fun failSummary(): String = failCodes.entries.sortedByDescending { it.value }.joinToString(" · ") { (code, n) ->
+        "${FailReason.short(code)} $n"
+    }
 
     companion object {
         const val FINDING = 0
@@ -42,6 +53,31 @@ class GrabJob(val id: Long, var title: String, val dir: File, val referer: Strin
         const val DONE = 3
         const val NOTHING = 4      // 못 찾음
         const val CANCELED = 5
+        const val COLLECTING = 6   // 넘기며 모으는 중 (찾는 대로 바로 받음)
+    }
+}
+
+/** 실패 이유 */
+object FailReason {
+    fun short(code: Int) = when (code) {
+        401, 403 -> "접근 거부($code)"
+        404, 410 -> "없음($code)"
+        429 -> "요청 너무 잦음"
+        in 500..599 -> "서버 오류($code)"
+        -2 -> "이미지 아님"
+        -3 -> "빈 파일"
+        else -> "연결 오류"
+    }
+
+    /** 실패 이유를 쉬운 말로 */
+    fun long(code: Int) = when (code) {
+        401, 403 -> "서버가 거부했어요. 로그인이 필요하거나, 다른 사이트·앱에서 직접 가져가는 걸 막거나, 주소의 유효 시간이 지났을 수 있어요."
+        404, 410 -> "그 주소에 파일이 없어요. 지워졌거나 주소가 바뀌었어요."
+        429 -> "짧은 시간에 너무 많이 요청해서 서버가 잠시 막았어요. 조금 뒤 다시 받기를 해 보세요."
+        in 500..599 -> "서버 쪽 문제예요. 조금 뒤 다시 받기를 해 보세요."
+        -2 -> "이미지 대신 웹페이지(로그인 화면·안내 화면 등)가 왔어요."
+        -3 -> "서버가 빈 파일을 보냈어요."
+        else -> "연결이 끊겼거나 응답이 없었어요."
     }
 }
 
@@ -105,7 +141,7 @@ object JobStore {
 
     fun cancel(j: GrabJob) {
         j.canceled = true
-        if (j.active) {
+        if (j.active || j.state == GrabJob.FOUND) {
             j.state = GrabJob.CANCELED
             j.status = "취소됨"
         }
@@ -339,58 +375,221 @@ object JobStore {
 
     // ================= 받기 =================
 
+    private val retryTimer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
+
+    /** 찾은 주소를 한꺼번에 받기 (폴더 받기·번호 찾기) */
     fun download(j: GrabJob, urls: List<String> = j.urls) {
         if (urls.isEmpty()) return
-        j.urls = urls
+        resetProgress(j)
         j.state = GrabJob.DOWNLOADING
-        j.total = urls.size
+        j.status = "받는 중… 0 / ${urls.size}"
+        urls.forEach { add(j, it) }
+        changed(j, true)
+    }
+
+    /** 넘기며 모으기: 작업을 먼저 만들고, 이미지를 찾을 때마다 바로 받는다 (주소가 만료되기 전에) */
+    fun startCollecting(title: String, referer: String?, ua: String?): GrabJob {
+        val j = create(title, referer, ua)
+        j.how = "넘기며 모으기"
+        resetProgress(j)
+        j.state = GrabJob.COLLECTING
+        j.status = "모으면서 받는 중…"
+        changed(j, true)
+        return j
+    }
+
+    /** 모으기가 끝남: 남은 이미지를 마저 받고 완료 */
+    fun endCollecting(j: GrabJob) {
+        if (j.state != GrabJob.COLLECTING) return
+        if (j.total == 0) {
+            remove(j)
+            return
+        }
+        j.state = GrabJob.DOWNLOADING
+        updateStatus(j)
+        if (j.done >= j.total) finish(j) else changed(j, true)
+    }
+
+    private fun resetProgress(j: GrabJob) {
+        j.urls = emptyList()
+        j.total = 0
         j.done = 0
         j.fails = 0
-        j.slots = arrayOfNulls(urls.size)
+        j.slots.clear()
+        j.failed.clear()
+        j.failCodes.clear()
+        j.failReason.clear()
         j.pics.clear()
-        j.status = "받는 중… 0 / ${urls.size}"
+    }
+
+    /** 이미지 하나 추가하고 바로 받기 시작 (메인 스레드) */
+    fun add(j: GrabJob, url: String) {
+        if (j.canceled) return
+        val i = j.slots.size
+        j.slots.add(null)
+        j.urls = j.urls + url
+        j.total = j.slots.size
+        fetch(j, i, url, attempt = 1)
+    }
+
+    /** 실패한 것만 다시 받기 */
+    fun retryFailed(j: GrabJob) {
+        if (j.failed.isEmpty() || j.active) return
+        val list = j.failed.toList()
+        j.failed.clear()
+        j.failCodes.clear()
+        j.fails = 0
+        j.done -= list.size
+        j.state = GrabJob.DOWNLOADING
+        updateStatus(j)
         changed(j, true)
-        val doneCount = AtomicInteger(0)
-        val failCount = AtomicInteger(0)
-        val digits = urls.size.toString().length.coerceAtLeast(3)
-        urls.forEachIndexed { i, url ->
-            pool.execute {
-                if (j.canceled) return@execute
-                val raw = try { URLDecoder.decode(Uri.parse(url).lastPathSegment ?: "img", "UTF-8") } catch (e: Exception) { "img" }
-                val clean = raw.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(80)
-                val f = File(j.dir, (i + 1).toString().padStart(digits, '0') + "_" + clean)
-                var ok = false
-                try {
-                    val c = open(j, url)
-                    if (c.responseCode in 200..299 && !(c.contentType ?: "").contains("html", true)) {
-                        c.inputStream.use { ins -> FileOutputStream(f).use { ins.copyTo(it, 64 * 1024) } }
-                        ok = f.length() > 0
-                    }
-                    c.disconnect()
-                } catch (e: Exception) {
-                }
-                if (!ok) { f.delete(); failCount.incrementAndGet() }
-                val n = doneCount.incrementAndGet()
-                main.post {
-                    if (j.canceled) return@post
-                    if (ok) {
-                        j.slots[i] = GrabJob.Pic(url, f)
-                        j.pics.clear()
-                        j.slots.forEach { p -> if (p != null) j.pics.add(p) }
-                    }
-                    j.done = n
-                    j.fails = failCount.get()
-                    j.status = "받는 중… $n / ${j.total}" + if (j.fails > 0) " (실패 ${j.fails})" else ""
-                    if (n == j.total) finish(j) else changed(j)
+        list.forEach { i -> fetch(j, i, j.urls[i], attempt = 1) }
+    }
+
+    private fun fileFor(j: GrabJob, i: Int, url: String): File {
+        val raw = try { URLDecoder.decode(Uri.parse(url).lastPathSegment ?: "img", "UTF-8") } catch (e: Exception) { "img" }
+        val clean = raw.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(80).ifBlank { "img" }
+        return File(j.dir, (i + 1).toString().padStart(4, '0') + "_" + clean)
+    }
+
+    /** 받기 하나: 실패하면 2초·5초 뒤 두 번 더 시도 */
+    private fun fetch(j: GrabJob, i: Int, url: String, attempt: Int) {
+        pool.execute {
+            if (j.canceled) return@execute
+            val f = fileFor(j, i, url)
+            var code = -1
+            // 1) 페이지가 불러올 때 앱이 같이 받아 둔 것이 있으면 그대로 사용 (다시 요청하지 않음)
+            var cap = j.captured[url]
+            if (cap == null && j.state == GrabJob.COLLECTING && attempt == 1) {
+                // 화면에서 주소를 먼저 찾고 이미지가 아직 내려오는 중일 수 있어 잠깐 기다림
+                for (w in 0 until 25) {
+                    Thread.sleep(200)
+                    cap = j.captured[url]
+                    if (cap != null || j.canceled) break
                 }
             }
+            val got = cap
+            if (got != null && got.exists() && got.length() > 0) {
+                if (got.renameTo(f) || (runCatching { got.copyTo(f, overwrite = true) }.isSuccess && f.length() > 0)) {
+                    j.captured.remove(url)
+                    main.post { fetched(j, i, url, f, true, 200) }
+                    return@execute
+                }
+            }
+            // 2) 없으면 같은 조건(머리말·쿠키)으로 직접 요청
+            try {
+                val c = open(j, url)
+                // 페이지가 그 이미지를 불러올 때 쓴 머리말을 그대로 (Referer 등)
+                j.headers[url]?.forEach { (k, v) ->
+                    if (!k.equals("Range", true) && !k.equals("Accept-Encoding", true) && !k.equals("Cookie", true)) {
+                        c.setRequestProperty(k, v)
+                    }
+                }
+                code = c.responseCode
+                if (code in 200..299) {
+                    if ((c.contentType ?: "").contains("html", true)) code = -2
+                    else {
+                        c.inputStream.use { ins -> FileOutputStream(f).use { ins.copyTo(it, 64 * 1024) } }
+                        if (f.length() <= 0) code = -3
+                    }
+                }
+                c.disconnect()
+            } catch (e: Exception) {
+                code = -1
+            }
+            val ok = code in 200..299
+            if (!ok) {
+                f.delete()
+                // 일시적인 실패는 잠깐 쉬었다 다시
+                val retryable = code == -1 || code == 429 || code in 500..599 || code == 403
+                if (retryable && attempt < 3 && !j.canceled) {
+                    retryTimer.schedule(Runnable { fetch(j, i, url, attempt + 1) }, if (attempt == 1) 2L else 5L, java.util.concurrent.TimeUnit.SECONDS)
+                    return@execute
+                }
+            }
+            main.post { fetched(j, i, url, f, ok, code) }
         }
+    }
+
+    private fun fetched(j: GrabJob, i: Int, url: String, f: File, ok: Boolean, code: Int) {
+        if (j.canceled || i >= j.slots.size) return
+        if (ok) {
+            j.slots[i] = GrabJob.Pic(url, f)
+            j.pics.clear()
+            j.slots.forEach { p -> if (p != null) j.pics.add(p) }
+            j.failReason.remove(i)
+        } else {
+            j.failed.add(i)
+            j.failCodes[code] = (j.failCodes[code] ?: 0) + 1
+            j.failReason[i] = code
+        }
+        j.done++
+        j.fails = j.failed.size
+        updateStatus(j)
+        if (j.state != GrabJob.COLLECTING && j.done >= j.total) finish(j) else changed(j)
+    }
+
+    /** 실패한 이미지 목록: (순번, 주소, 실패 코드) */
+    fun failList(j: GrabJob): List<Triple<Int, String, Int>> =
+        j.failed.map { i -> Triple(i, j.urls.getOrElse(i) { "" }, j.failReason[i] ?: -1) }
+
+    // ================= 페이지와 함께 받기 =================
+
+    /**
+     * 모으는 중인 탭이 이미지를 요청할 때 앱이 대신 받아서
+     * 1) 페이지에는 그대로 넘겨 주고 2) 같은 내용을 작업 폴더에 저장해 둔다.
+     * (shouldInterceptRequest에서 부름: 다른 스레드) 실패하면 null → 웹뷰가 원래대로 받음
+     */
+    fun interceptImage(j: GrabJob, url: String, reqHeaders: Map<String, String>): android.webkit.WebResourceResponse? {
+        if (j.canceled) return null
+        return try {
+            val c = open(j, url)
+            reqHeaders.forEach { (k, v) ->
+                if (!k.equals("Range", true) && !k.equals("Accept-Encoding", true) && !k.equals("Cookie", true)) {
+                    c.setRequestProperty(k, v)
+                }
+            }
+            val code = c.responseCode
+            val type = c.contentType ?: ""
+            val msg = c.responseMessage?.takeIf { it.isNotBlank() } ?: "OK"
+            if (code !in 200..299 || type.contains("html", true)) {
+                c.disconnect()
+                return null
+            }
+            val bytes = c.inputStream.use { it.readBytes() }
+            // 서버가 보낸 쿠키는 브라우저에도 반영
+            c.headerFields["Set-Cookie"]?.forEach { CookieManager.getInstance().setCookie(url, it) }
+            val outHeaders = HashMap<String, String>()
+            c.headerFields.forEach { (k, v) ->
+                if (k != null && v != null && !k.equals("Content-Encoding", true) && !k.equals("Content-Length", true) &&
+                    !k.equals("Transfer-Encoding", true) && !k.equals("Set-Cookie", true)
+                ) outHeaders[k] = v.joinToString(", ")
+            }
+            c.disconnect()
+            if (bytes.isNotEmpty() && !j.canceled) {
+                val dir = File(j.dir, "cap").apply { mkdirs() }
+                val f = File(dir, "c" + System.nanoTime())
+                FileOutputStream(f).use { it.write(bytes) }
+                j.captured.putIfAbsent(url, f)
+            }
+            val mime = type.substringBefore(';').trim().ifEmpty { "image/*" }
+            val charset = Regex("charset=([^;]+)", RegexOption.IGNORE_CASE).find(type)?.groupValues?.get(1)
+            android.webkit.WebResourceResponse(mime, charset, code, msg, outHeaders,
+                java.io.ByteArrayInputStream(bytes))
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun updateStatus(j: GrabJob) {
+        val head = if (j.state == GrabJob.COLLECTING) "모으면서 받는 중…" else "받는 중…"
+        j.status = "$head ${j.done} / ${j.total}" + if (j.fails > 0) " (실패 ${j.fails}: ${j.failSummary()})" else ""
     }
 
     private fun finish(j: GrabJob) {
         j.state = GrabJob.DONE
         val size = j.pics.sumOf { it.file.length() }
-        j.status = "${j.pics.size}개 받음 · ${Downloads.size(size)}" + if (j.fails > 0) " · 실패 ${j.fails}" else ""
+        j.status = "${j.pics.size}개 받음 · ${Downloads.size(size)}" + if (j.fails > 0) " · 실패 ${j.fails} (${j.failSummary()})" else ""
         changed(j, true)
         BgWork.jobDone(app, j)
         onFinished?.invoke(j)

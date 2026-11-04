@@ -1094,6 +1094,8 @@ class MainActivity : Activity() {
 
         override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
             if (adblock && !request.isForMainFrame && AdBlock.blocked(request.url.host)) return AdBlock.empty()
+            // 넘기며 모으는 탭이면 이미지를 받아 두면서 페이지에 넘겨 줌
+            if (::collector.isInitialized) collector.intercept(view, request)?.let { return it }
             return null
         }
 
@@ -1603,6 +1605,11 @@ class MainActivity : Activity() {
     }
 
     fun collectJobsInfo() = collector.info()
+
+    fun openGrabJob(g: GrabJob) {
+        closeOverlays()
+        grabber.openJob(g)
+    }
 
     fun openDownloadsPage() = pages.openDownloads()
 

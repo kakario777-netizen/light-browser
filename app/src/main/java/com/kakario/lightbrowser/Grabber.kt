@@ -253,7 +253,7 @@ class Grabber(private val a: MainActivity) {
         when (j.state) {
             GrabJob.FINDING -> { b?.visibility = View.VISIBLE; b?.isIndeterminate = true }
             GrabJob.FOUND -> b?.visibility = View.GONE
-            GrabJob.DOWNLOADING -> {
+            GrabJob.DOWNLOADING, GrabJob.COLLECTING -> {
                 b?.visibility = View.VISIBLE
                 b?.isIndeterminate = false
                 b?.max = j.total.coerceAtLeast(1)
@@ -263,6 +263,7 @@ class Grabber(private val a: MainActivity) {
                 b?.visibility = View.GONE
                 actions?.visibility = View.VISIBLE
                 updateCount()
+                if (j.fails > 0) showFailed(j)
             }
             GrabJob.NOTHING -> {
                 b?.visibility = View.GONE
@@ -294,6 +295,67 @@ class Grabber(private val a: MainActivity) {
             closeView()
             a.startCollector()
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, a.dp(46)))
+    }
+
+    /** 받기가 끝났는데 실패한 게 있을 때: 이유 보기 / 다시 받기 */
+    private fun showFailed(j: GrabJob) {
+        val box = failBox ?: return
+        box.removeAllViews()
+        box.visibility = View.VISIBLE
+        box.setPadding(a.dp(10), a.dp(4), a.dp(10), 0)
+        val row = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL }
+        row.addView(button("실패 이유 보기", filled = false) { showFailReasons(j) },
+            LinearLayout.LayoutParams(0, a.dp(42), 1f).apply { rightMargin = a.dp(6) })
+        row.addView(button("실패한 ${j.fails}개 다시 받기", filled = false) {
+            JobStore.retryFailed(j)
+        }, LinearLayout.LayoutParams(0, a.dp(42), 1.2f))
+        box.addView(row)
+    }
+
+    private fun showFailReasons(j: GrabJob) {
+        val list = JobStore.failList(j)
+        if (list.isEmpty()) return
+        val body = LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(a.dp(22), a.dp(6), a.dp(22), a.dp(6))
+        }
+        // 이유별 설명 먼저
+        list.groupBy { it.third }.entries.sortedByDescending { it.value.size }.forEach { (code, items) ->
+            body.addView(TextView(a).apply {
+                text = "${FailReason.short(code)} · ${items.size}개"
+                textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(a.getColor(R.color.accent))
+                setPadding(0, a.dp(10), 0, a.dp(2))
+            })
+            body.addView(TextView(a).apply {
+                text = FailReason.long(code)
+                textSize = 13f
+                setTextColor(a.getColor(R.color.text))
+                setPadding(0, 0, 0, a.dp(4))
+            })
+            items.take(30).forEach { (i, url, _) ->
+                body.addView(TextView(a).apply {
+                    text = "${i + 1}번  $url"
+                    textSize = 11f
+                    setTextColor(a.getColor(R.color.sub))
+                    maxLines = 2
+                    ellipsize = TextUtils.TruncateAt.MIDDLE
+                    setTextIsSelectable(true)
+                })
+            }
+            if (items.size > 30) body.addView(TextView(a).apply {
+                text = "… 외 ${items.size - 30}개"
+                textSize = 11f
+                setTextColor(a.getColor(R.color.sub))
+            })
+        }
+        AlertDialog.Builder(a)
+            .setTitle("실패한 이미지 ${list.size}개")
+            .setView(ScrollView(a).apply { addView(body) })
+            .setPositiveButton("다시 받기") { _, _ -> JobStore.retryFailed(j) }
+            .setNegativeButton("닫기", null)
+            .show()
     }
 
     private fun header(title: String, onBack: () -> Unit, right: View? = null): Pair<LinearLayout, TextView> {
@@ -521,17 +583,17 @@ class Grabber(private val a: MainActivity) {
             any = true
             section(body, "넘기며 모으는 중")
             collects.forEach { c ->
-                body.addView(jobRow(c.title, c.status, 0, 0, true, { closeList(); c.goTo() }, null, listOf(
-                    "탭으로 가기" to { closeList(); c.goTo() },
-                    "멈추고 받기" to { c.finish() },
-                    "취소" to { c.cancel() },
-                )))
+                val btns = mutableListOf<Pair<String, () -> Unit>>("탭으로 가기" to { closeList(); c.goTo() })
+                if (c.paused) btns.add("이어 넘기기" to { c.resume() })
+                btns.add("여기까지로 끝" to { c.end() })
+                btns.add("취소" to { c.cancel() })
+                body.addView(jobRow(c.title, c.status, 0, 0, !c.paused, { closeList(); c.goTo() }, null, btns))
             }
         }
 
         val jobs = JobStore.jobs.toList()
-        val activeJobs = jobs.filter { it.active || it.state == GrabJob.FOUND }
-        val doneJobs = jobs.filter { !it.active && it.state != GrabJob.FOUND }
+        val activeJobs = jobs.filter { (it.active || it.state == GrabJob.FOUND) && it.state != GrabJob.COLLECTING }
+        val doneJobs = jobs.filter { !it.active && it.state != GrabJob.FOUND && it.state != GrabJob.COLLECTING }
         if (activeJobs.isNotEmpty()) {
             any = true
             section(body, "이미지 받는 중")

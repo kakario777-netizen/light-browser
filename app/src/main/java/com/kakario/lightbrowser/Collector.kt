@@ -3,6 +3,7 @@ package com.kakario.lightbrowser
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -10,24 +11,27 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import org.json.JSONArray
 import org.json.JSONTokener
+import java.util.concurrent.ConcurrentHashMap
 
 /** 작업 목록 화면에 보여줄 모으기 작업 정보 */
 class CollectInfo(
-    val title: String, val status: String,
-    val goTo: () -> Unit, val finish: () -> Unit, val cancel: () -> Unit,
+    val title: String, val status: String, val paused: Boolean,
+    val goTo: () -> Unit, val resume: () -> Unit, val end: () -> Unit, val cancel: () -> Unit,
 )
 
 /**
  * 페이지 넘기며 모으기 (탭마다 따로, 여러 개 동시에).
  * 1페이지에서 시작 → '다음 페이지로 넘기는 곳'을 꾸욱 → 앱이 그 자리를 대신 눌러 가며
- * 화면에 크게 보이는 이미지를 모은다. 다른 탭·다른 앱·화면 꺼짐에서도 계속.
- * 끝나면 그 결과를 바로 받기 작업으로 넘긴다.
+ * 화면에 크게 보이는 이미지를 찾고, 찾는 즉시 받는다(이미지 주소가 시간이 지나 만료되기 전에).
+ * 더 넘어가지 않으면 끝내지 않고 '멈춤' 상태로 두어 이어서 넘길 수 있게 한다.
  */
 class Collector(private val a: MainActivity) {
     private val main = Handler(Looper.getMainLooper())
@@ -35,6 +39,8 @@ class Collector(private val a: MainActivity) {
     inner class Job(val wv: WebView) {
         var auto = false
         var running = false
+        var paused = false
+        var stopReason = ""
         var tapX = 0f
         var tapY = 0f
         val startPage: String? = wv.url
@@ -45,17 +51,20 @@ class Collector(private val a: MainActivity) {
         var failedTaps = 0
         var goodMethod = -1     // 이 사이트에서 통한 넘기기 방법
         var lastMethod = 0
+        var pages = 1
         var text = ""
+        var grab: GrabJob? = null
 
-        fun title() = (wv.title?.takeIf { it.isNotBlank() } ?: android.net.Uri.parse(startPage ?: "").host ?: "images").take(40)
+        fun title() = (wv.title?.takeIf { it.isNotBlank() } ?: Uri.parse(startPage ?: "").host ?: "images").take(40)
 
-        val loop = object : Runnable {
-            override fun run() = step(this@Job)
-        }
+        val loop = Runnable { step(this) }
     }
 
     private val jobs = mutableListOf<Job>()
     private var pending: Job? = null          // 넘기는 자리를 기다리는 중
+
+    /** 웹뷰별 받기 작업 (이미지 요청 머리말을 모으는 데 씀, 다른 스레드에서도 읽음) */
+    private val grabByView = ConcurrentHashMap<Int, GrabJob>()
 
     // 아래 막대 (지금 보는 탭의 작업 상태)
     private var bar: View? = null
@@ -71,6 +80,27 @@ class Collector(private val a: MainActivity) {
     private fun jobOf(w: WebView?) = jobs.firstOrNull { it.wv === w }
 
     private fun onScreen(j: Job) = a.isShown && a.currentWebView() === j.wv
+
+    // ================= 이미지 요청 머리말 기록 =================
+
+    private val imgPath = Regex("\\.(jpe?g|png|gif|webp|bmp|avif|jfif)$", RegexOption.IGNORE_CASE)
+
+    /**
+     * 모으는 중인 탭이 이미지를 불러올 때: 앱이 대신 받아서 페이지에 넘겨 주고, 같은 내용을 저장해 둔다.
+     * 그래서 나중에 서버에 다시 요청하지 않아도 되고(만료·차단 걱정 없음), 실패하면 웹뷰가 원래대로 받는다.
+     * (shouldInterceptRequest에서 부름: 다른 스레드)
+     */
+    fun intercept(view: WebView, req: WebResourceRequest): WebResourceResponse? {
+        val g = grabByView[System.identityHashCode(view)] ?: return null
+        if (req.isForMainFrame || !req.method.equals("GET", true)) return null
+        val url = req.url.toString()
+        if (!url.startsWith("http")) return null
+        val accept = req.requestHeaders["Accept"] ?: req.requestHeaders["accept"] ?: ""
+        if (!accept.contains("image") && !imgPath.containsMatchIn(req.url.path ?: "")) return null
+        if (g.headers.size < 8000) g.headers.putIfAbsent(url, HashMap(req.requestHeaders))
+        if (g.captured.containsKey(url)) return null
+        return JobStore.interceptImage(g, url, req.requestHeaders)
+    }
 
     // ================= 시작 =================
 
@@ -103,15 +133,29 @@ class Collector(private val a: MainActivity) {
 
     private fun startRunning(j: Job, autoTap: Boolean) {
         if (pending === j) pending = null
-        j.running = true
         j.auto = autoTap
+        // 받기 작업을 먼저 만들고, 지금까지 찾은 이미지부터 바로 받기
+        val g = JobStore.startCollecting(j.title(), j.startPage, j.wv.settings.userAgentString)
+        j.grab = g
+        grabByView[System.identityHashCode(j.wv)] = g
+        j.found.forEach { JobStore.add(g, it) }
+        jobs.add(j)
+        run(j)
+    }
+
+    private fun run(j: Job) {
+        j.running = true
+        j.paused = false
+        j.stopReason = ""
+        j.failedTaps = 0
         j.lastNewAt = SystemClock.uptimeMillis()
         j.lastTapAt = 0L
-        j.goodMethod = -1
-        jobs.add(j)
+        j.wv.onResume()
+        updateText(j)
         report()
         refreshBar()
-        main.postDelayed(j.loop, if (autoTap) 900 else 600)
+        main.removeCallbacks(j.loop)
+        main.postDelayed(j.loop, if (j.auto) 900 else 600)
     }
 
     // ================= 반복 =================
@@ -119,30 +163,33 @@ class Collector(private val a: MainActivity) {
     private fun step(j: Job) {
         if (!j.running) return
         if (!a.hasWebView(j.wv)) {
-            finishJob(j)   // 모으던 탭이 닫힘
+            endJob(j)   // 모으던 탭이 닫힘
             return
         }
         snap(j) {
             if (!j.running) return@snap
             val now = SystemClock.uptimeMillis()
             if (j.auto) {
-                val sinceTap = now - j.lastTapAt
+                val waitLimit = if (onScreen(j)) 6000 else 10000   // 화면 밖에서는 늦게 뜨므로 더 기다림
                 when {
                     // 새 이미지가 나오고 0.8초 지나면 다음 장
                     j.lastNewAt > j.lastTapAt && now - j.lastNewAt > 800 -> {
-                        if (j.lastTapAt != 0L) j.goodMethod = j.lastMethod
+                        if (j.lastTapAt != 0L) {
+                            j.goodMethod = j.lastMethod
+                            j.pages++
+                        }
                         j.failedTaps = 0
                         tap(j)
                     }
-                    // 6초 넘게 새 이미지가 없으면 다시 눌러 보고, 여러 번 연속이면 끝
-                    j.lastTapAt == 0L || sinceTap > 6000 -> {
+                    j.lastTapAt == 0L || now - j.lastTapAt > waitLimit -> {
                         if (j.lastTapAt != 0L) j.failedTaps++
-                        if (j.failedTaps >= (if (onScreen(j)) 3 else 6)) {
-                            j.text = "더 넘어가지 않아요. 마지막 페이지로 보고 마무리할게요"
-                            refreshBar()
-                            main.postDelayed({ finishJob(j) }, 900)
+                        val limit = if (onScreen(j)) 3 else 6
+                        if (j.failedTaps >= limit) {
+                            pause(j, "${j.failedTaps}번 넘겨도 새 이미지가 안 나와요")
                             return@snap
                         }
+                        // 두 번째부터는 화면을 살짝 움직여 늦게 뜨는 이미지를 깨움
+                        if (j.failedTaps >= 1) nudge(j)
                         tap(j)
                     }
                 }
@@ -151,13 +198,20 @@ class Collector(private val a: MainActivity) {
         }
     }
 
+    private fun nudge(j: Job) {
+        j.wv.evaluateJavascript(
+            "(function(){try{window.scrollBy(0,2);setTimeout(function(){window.scrollBy(0,-2);},120);" +
+                "window.dispatchEvent(new Event('scroll'));window.dispatchEvent(new Event('resize'));}catch(e){}})()", null
+        )
+    }
+
     private fun tap(j: Job) {
         val w = j.wv
         j.lastTapAt = SystemClock.uptimeMillis()
         // 화면에 보이면 실제 터치. 안 보이면(다른 탭·다른 앱·화면 꺼짐) 통했던 방법 → 안 되면 바꿔 가며
         val m = when {
             onScreen(j) && j.goodMethod < 1 -> 0
-            j.goodMethod >= 0 -> j.goodMethod
+            j.goodMethod >= 0 && j.failedTaps < 2 -> j.goodMethod
             else -> j.failedTaps % 3
         }
         j.lastMethod = m
@@ -196,7 +250,7 @@ class Collector(private val a: MainActivity) {
         w.evaluateJavascript(js, null)
     }
 
-    /** 화면에 크게 보이는 이미지 주소를 모은다 */
+    /** 화면에 크게 보이는 이미지 주소를 모으고, 새로 찾은 건 바로 받기 시작 */
     private fun snap(j: Job, after: (() -> Unit)? = null) {
         val js = "(function(){var o=[],W=innerWidth,H=innerHeight;" +
             "function big(r){return r.width*r.height>W*H*0.12&&r.bottom>0&&r.top<H&&r.right>0&&r.left<W;}" +
@@ -214,7 +268,10 @@ class Collector(private val a: MainActivity) {
                     for (i in 0 until arr.length()) {
                         val u = arr.getString(i)
                         if (u.startsWith("http")) {
-                            if (j.found.add(u)) j.lastNewAt = SystemClock.uptimeMillis()
+                            if (j.found.add(u)) {
+                                j.lastNewAt = SystemClock.uptimeMillis()
+                                j.grab?.let { g -> if (j.running) JobStore.add(g, u) }
+                            }
                         } else if (u.startsWith("blob:") || u.startsWith("data:")) {
                             j.skipped++
                         }
@@ -223,13 +280,22 @@ class Collector(private val a: MainActivity) {
             } catch (e: Exception) {
             }
             if (j.running) {
-                j.text = (if (j.auto) "넘기며 모으는 중" else "직접 넘기는 동안 모으는 중") + " · ${j.found.size}장" +
-                    if (j.skipped > 0 && j.found.isEmpty()) "\n(이 사이트 이미지는 서버 주소가 없어 받을 수 없을 수 있어요)" else ""
+                updateText(j)
                 report()
                 if (barFor === j) barText?.text = j.text
             }
             after?.invoke()
         }
+    }
+
+    private fun updateText(j: Job) {
+        val g = j.grab
+        val dl = if (g != null) " · 받음 ${g.pics.size}" + (if (g.fails > 0) " (실패 ${g.fails})" else "") else ""
+        j.text = when {
+            j.paused -> "멈췄어요: ${j.stopReason}\n${j.found.size}장 찾음$dl · 받기는 계속돼요"
+            j.auto -> "넘기며 모으는 중 · ${j.found.size}장 찾음$dl"
+            else -> "직접 넘기는 동안 모으는 중 · ${j.found.size}장 찾음$dl"
+        } + if (j.skipped > 0 && j.found.isEmpty()) "\n(이 사이트 이미지는 서버 주소가 없어 받을 수 없을 수 있어요)" else ""
     }
 
     /** 진행 상황을 알림·작업 아이콘에 알림 */
@@ -240,26 +306,44 @@ class Collector(private val a: MainActivity) {
         a.onJobsChanged()
     }
 
-    // ================= 끝 =================
+    // ================= 멈춤·이어하기·끝 =================
 
-    /** 여기까지 모은 이미지를 받기 작업으로 넘김 */
-    private fun finishJob(j: Job) {
-        if (!jobs.contains(j)) return
+    /** 더 넘어가지 않을 때: 끝내지 않고 멈춤 (이미 찾은 건 계속 받음) */
+    private fun pause(j: Job, reason: String) {
         j.running = false
+        j.paused = true
+        j.stopReason = reason
+        main.removeCallbacks(j.loop)
+        updateText(j)
+        report()
+        refreshBar()
+        if (!onScreen(j)) BgWork.collectPaused(a, j.title(), j.found.size)
+    }
+
+    fun resume(j: Job) {
+        if (!jobs.contains(j) || j.running) return
+        run(j)
+    }
+
+    /** 여기까지로 끝: 모으기를 마치고 남은 받기만 마저 함 */
+    private fun endJob(j: Job) {
+        if (!jobs.contains(j)) return
+        val wasOnScreen = onScreen(j)
+        j.running = false
+        j.paused = false
         main.removeCallbacks(j.loop)
         jobs.remove(j)
-        val list = j.found.toList()
+        grabByView.remove(System.identityHashCode(j.wv))
+        val g = j.grab
         refreshBar()
-        if (list.isEmpty()) {
-            report()
-            if (a.isShown) a.toastMsg("모은 이미지가 없어요")
-            return
+        if (g != null) {
+            JobStore.endCollecting(g)   // 받기 작업이 남아 있으면 계속 (알림 유지를 위해 먼저)
+            if (wasOnScreen && JobStore.get(g.id) != null) a.openGrabJob(g)
         }
-        // 받기 작업을 먼저 만들고 나서 알림을 갱신해야, 화면이 꺼진 상태에서도 백그라운드 작업이 끊기지 않는다
-        // 그 탭을 보고 있으면 받는 화면을 열고, 아니면 뒤에서 받기만
-        a.openGrabberWith(list, j.startPage, j.wv.settings.userAgentString, j.title(), show = onScreen(j))
         report()
-        if (!onScreen(j) && a.isShown) a.snackMsg("'${j.title()}' 모으기 끝 · ${list.size}장 받는 중")
+        if (g == null || g.total == 0) {
+            if (a.isShown) a.toastMsg("모은 이미지가 없어요")
+        }
     }
 
     private fun cancelJob(j: Job) {
@@ -267,13 +351,15 @@ class Collector(private val a: MainActivity) {
         main.removeCallbacks(j.loop)
         jobs.remove(j)
         if (pending === j) pending = null
+        grabByView.remove(System.identityHashCode(j.wv))
+        j.grab?.let { JobStore.remove(it) }
         report()
         refreshBar()
     }
 
     /** 모으던 탭이 닫히려 할 때 */
     fun tabClosing(w: WebView) {
-        jobOf(w)?.let { finishJob(it) }
+        jobOf(w)?.let { endJob(it) }
         if (pending?.wv === w) pending = null
     }
 
@@ -286,10 +372,15 @@ class Collector(private val a: MainActivity) {
     }
 
     fun info(): List<CollectInfo> = jobs.map { j ->
-        CollectInfo(j.title(), "${j.found.size}장 모음" + if (a.currentWebView() === j.wv) " · 지금 보는 탭" else "",
+        CollectInfo(
+            j.title(),
+            j.text.replace("\n", " ") + if (a.currentWebView() === j.wv) " · 지금 보는 탭" else "",
+            j.paused,
             goTo = { a.selectTabOf(j.wv) },
-            finish = { finishJob(j) },
-            cancel = { cancelJob(j) })
+            resume = { resume(j) },
+            end = { endJob(j) },
+            cancel = { cancelJob(j) },
+        )
     }
 
     // ================= 아래 막대 =================
@@ -305,20 +396,32 @@ class Collector(private val a: MainActivity) {
         }
         if (bar == null) showBar()
         barFor = j
-        if (p != null) {
-            barText?.text = "다음 페이지로 넘기는 곳(다음 버튼이나 이미지 오른쪽 등)을 꾸욱 눌러 주세요"
-            setButtons(listOf(
-                "직접 넘길게요" to { startRunning(p, autoTap = false) },
-                "취소" to { cancelJob(p) },
-            ))
-            removeMarker()
-        } else {
-            barText?.text = j.text.ifEmpty { "모으는 중" }
-            setButtons(listOf(
-                "멈추고 받기" to { finishJob(j) },
-                "취소" to { cancelJob(j) },
-            ))
-            if (j.auto) showMarker(j) else removeMarker()
+        when {
+            p != null -> {
+                barText?.text = "다음 페이지로 넘기는 곳(다음 버튼이나 이미지 오른쪽 등)을 꾸욱 눌러 주세요"
+                setButtons(listOf(
+                    "직접 넘길게요" to { startRunning(p, autoTap = false) },
+                    "취소" to { cancelJob(p) },
+                ))
+                removeMarker()
+            }
+            j.paused -> {
+                barText?.text = j.text
+                setButtons(listOf(
+                    "이어 넘기기" to { resume(j) },
+                    "여기까지로 끝" to { endJob(j) },
+                    "취소" to { cancelJob(j) },
+                ))
+                if (j.auto) showMarker(j) else removeMarker()
+            }
+            else -> {
+                barText?.text = j.text.ifEmpty { "모으는 중" }
+                setButtons(listOf(
+                    "여기까지로 끝" to { endJob(j) },
+                    "취소" to { cancelJob(j) },
+                ))
+                if (j.auto) showMarker(j) else removeMarker()
+            }
         }
     }
 
@@ -367,7 +470,7 @@ class Collector(private val a: MainActivity) {
                 textSize = 14f
                 typeface = Typeface.DEFAULT_BOLD
                 setTextColor(0xFFFF6B70.toInt())
-                setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(8))
+                setPadding(a.dp(12), a.dp(10), a.dp(12), a.dp(8))
                 a.ripple(this)
                 setOnClickListener { act() }
             })

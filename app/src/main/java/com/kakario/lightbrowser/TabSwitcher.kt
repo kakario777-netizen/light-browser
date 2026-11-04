@@ -30,9 +30,20 @@ class TabSwitcher(private val a: MainActivity) {
 
     val isOpen get() = root != null
 
+    private var opening = false
+
+    /** 지금 탭 화면을 먼저 찍고(탭 목록이 덮기 전에) 연다 */
     fun open() {
+        if (isOpen || opening) return
+        opening = true
+        a.captureCurrentTab {
+            opening = false
+            show()
+        }
+    }
+
+    private fun show() {
         if (isOpen) return
-        a.captureCurrentTab()
         val dm = a.resources.displayMetrics
         val box = LinearLayout(a).apply {
             orientation = LinearLayout.VERTICAL
@@ -195,16 +206,9 @@ class TabSwitcher(private val a: MainActivity) {
 
             val thumb = t.thumb
             if (thumb != null && !t.home) {
-                col.addView(ImageView(a).apply {
+                col.addView(TopCrop(a).apply {
                     setImageBitmap(thumb)
-                    scaleType = ImageView.ScaleType.MATRIX
-                    // 위쪽 기준으로 폭에 맞춤
-                    post {
-                        if (width > 0) {
-                            val s = width.toFloat() / thumb.width
-                            imageMatrix = android.graphics.Matrix().apply { setScale(s, s) }
-                        }
-                    }
+                    setBackgroundColor(a.getColor(R.color.field))
                 }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             } else {
                 col.addView(TextView(a).apply {
@@ -225,5 +229,29 @@ class TabSwitcher(private val a: MainActivity) {
                 }
             }
         }
+    }
+}
+
+/** 미리보기 그림을 카드 폭에 맞추고 위쪽부터 보여줌 (크기가 정해질 때마다 다시 맞춤) */
+private class TopCrop(ctx: android.content.Context) : ImageView(ctx) {
+    init {
+        scaleType = ScaleType.MATRIX
+    }
+
+    private fun fit() {
+        val d = drawable ?: return
+        if (width <= 0 || d.intrinsicWidth <= 0) return
+        val s = width.toFloat() / d.intrinsicWidth
+        imageMatrix = android.graphics.Matrix().apply { setScale(s, s) }
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        fit()
+    }
+
+    override fun setImageBitmap(bm: android.graphics.Bitmap?) {
+        super.setImageBitmap(bm)
+        fit()
     }
 }

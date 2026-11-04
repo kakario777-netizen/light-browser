@@ -720,6 +720,22 @@ class Grabber(private val a: MainActivity) {
         val j = job ?: return
         val list = chosen()
         if (list.isEmpty()) { a.toastMsg("고른 이미지가 없어요"); return }
+        zip(j, list, deleteAfter = false)
+        a.toastMsg("압축 중… 끝나면 알림이 떠요")
+    }
+
+    /**
+     * 받은 이미지 전체를 압축 (완료 후 자동 압축). deleteAfter면 압축이 끝난 뒤 작업과 임시 이미지를 지움.
+     * 앱을 안 보고 있어도 동작.
+     */
+    fun zipAll(j: GrabJob, deleteAfter: Boolean) {
+        val list = j.pics.filter { it.file.exists() }
+        if (list.isEmpty()) return
+        j.addLog("자동 압축 시작 · ${list.size}장" + if (deleteAfter) " · 끝나면 임시 이미지 삭제" else "")
+        zip(j, list, deleteAfter)
+    }
+
+    private fun zip(j: GrabJob, list: List<GrabJob.Pic>, deleteAfter: Boolean) {
         val name = j.title.replace(Regex("[\\\\/:*?\"<>|]"), "_").ifBlank { "images" } + ".zip"
         val total = list.sumOf { it.file.length() }
         Downloads.saveWith(a, name, "application/zip", total, { out, progress ->
@@ -742,9 +758,16 @@ class Grabber(private val a: MainActivity) {
                 }
             }
         }) { item ->
-            if (item.state == Downloads.DONE) askCleanup(j, "$name 저장했어요 (${list.size}개)")
+            if (item.state != Downloads.DONE) {
+                j.addLog("압축 실패 · ${item.error ?: ""}")
+                return@saveWith
+            }
+            if (deleteAfter) {
+                if (job === j) closeView()
+                JobStore.remove(j)
+                if (a.isShown) a.snackMsg("$name 저장 완료 · 받은 이미지는 지웠어요")
+            } else askCleanup(j, "$name 저장했어요 (${list.size}개)")
         }
-        a.toastMsg("압축 중… 끝나면 알림이 떠요")
     }
 
     private fun saveEach() {

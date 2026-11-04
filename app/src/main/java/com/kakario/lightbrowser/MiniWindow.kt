@@ -30,6 +30,17 @@ class MiniWindow(private val a: MainActivity) {
     private val hosted = mutableListOf<Triple<WebView, FrameLayout, TextView>>()
 
     val isShowing get() = root != null
+    private var keepOn = false
+
+    /** 넘기며 모으는 동안 다른 앱을 보고 있어도 화면이 꺼지지 않게 */
+    fun setKeepScreenOn(on: Boolean) {
+        keepOn = on
+        val p = params ?: return
+        val r = root ?: return
+        p.flags = if (on) p.flags or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        else p.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON.inv()
+        try { wm.updateViewLayout(r, p) } catch (e: Exception) {}
+    }
 
     fun canUse() = Settings.canDrawOverlays(a)
 
@@ -95,7 +106,8 @@ class MiniWindow(private val a: MainActivity) {
         val p = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+                (if (keepOn) WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON else 0),
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.END

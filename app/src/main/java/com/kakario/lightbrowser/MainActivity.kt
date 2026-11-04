@@ -194,6 +194,47 @@ class MainActivity : Activity() {
     var isShown = false
         private set
 
+    private lateinit var parking: FrameLayout
+
+    /**
+     * 지금 보는 탭이 아닌데 넘기며 모으는 중인 페이지는 화면 뒤(parking)에 붙여 둔다.
+     * 화면에서 떼어 내면 웹 엔진이 멈추기 때문. 모으기가 끝난 페이지는 떼어 냄.
+     */
+    fun parkCollecting() {
+        if (!::parking.isInitialized || !::collector.isInitialized) return
+        if (::mini.isInitialized && mini.isShowing) return
+        val current = tabs.getOrNull(cur)?.takeIf { !it.home }?.webView
+        val want = collector.miniPages().filter { it !== current && hasWebView(it) }
+        // 더 이상 필요 없는 것 떼기
+        for (i in parking.childCount - 1 downTo 0) {
+            val v = parking.getChildAt(i)
+            if (v !in want) parking.removeViewAt(i)
+        }
+        val cw = content.width.takeIf { it > 0 } ?: resources.displayMetrics.widthPixels
+        val ch = content.height.takeIf { it > 0 } ?: (resources.displayMetrics.heightPixels * 0.8f).toInt()
+        want.forEach { w ->
+            if (w.parent !== parking) {
+                (w.parent as? ViewGroup)?.removeView(w)
+                parking.addView(w, FrameLayout.LayoutParams(w.width.takeIf { it > 0 } ?: cw, w.height.takeIf { it > 0 } ?: ch))
+            }
+        }
+    }
+
+    /** 넘기며 모으는 동안 화면 꺼짐 방지 */
+    private var keepOn = false
+
+    fun setKeepScreenOn(on: Boolean) {
+        if (on == keepOn) return
+        keepOn = on
+        if (on) {
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            if (isShown) showSnack("넘기며 모으는 동안 화면이 꺼지지 않게 해 둘게요", null, 4_000)
+        } else {
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        if (::mini.isInitialized) mini.setKeepScreenOn(on)
+    }
+
     /** 홈·다른 앱 위에 띄우는 작은 창 (넘기며 모으는 페이지를 계속 '보이게' 둠) */
     lateinit var mini: MiniWindow
 
@@ -214,6 +255,7 @@ class MainActivity : Activity() {
             mini.hide()
             if (tabs.isNotEmpty()) showTab()
         }
+        if (::parking.isInitialized) parkCollecting()
     }
 
     /** 웹뷰의 원래 크기 (탭 화면 크기) */
@@ -236,6 +278,7 @@ class MainActivity : Activity() {
         super.onResume()
         isShown = true
         onJobsChanged()
+        if (::grabber.isInitialized) frame.post { askPendingZips() }
         tabs.getOrNull(cur)?.let { if (!it.home) it.webView.onResume() }
     }
 
@@ -426,7 +469,6 @@ class MainActivity : Activity() {
         val homeBtn = iconBtn(R.drawable.ic_home, "홈") {
             val t = tab
             if (!t.home) {
-                captureCurrentTab()
                 t.home = true
                 t.homeByButton = true
                 showTab()
@@ -457,6 +499,9 @@ class MainActivity : Activity() {
         root.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         root.addView(line())
         root.addView(bottom)
+        // 다른 탭에서 넘기며 모으는 페이지를 붙여 두는 곳 (화면 뒤에 가려져 있지만 웹 엔진은 '보이는 중'으로 다룸)
+        parking = FrameLayout(this)
+        frame.addView(parking, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         frame.addView(root, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         setContentView(frame)
     }
@@ -613,7 +658,6 @@ class MainActivity : Activity() {
         }
         tabs.add(t)
         if (select) {
-            captureCurrentTab()
             tabs.getOrNull(cur)?.webView?.let { pauseTab(it) }
             cur = tabs.size - 1
             showTab()
@@ -645,7 +689,6 @@ class MainActivity : Activity() {
     fun selectTab(i: Int) {
         if (i !in tabs.indices) return
         if (i != cur) {
-            captureCurrentTab()
             tabs.getOrNull(cur)?.webView?.let { pauseTab(it) }
             cur = i
         }
@@ -670,6 +713,7 @@ class MainActivity : Activity() {
         val t = tab
         content.removeAllViews()
         (t.webView.parent as? ViewGroup)?.removeView(t.webView)
+        parkCollecting()
         if (t.home) {
             buildHome()
             content.addView(homeView)
@@ -753,11 +797,18 @@ class MainActivity : Activity() {
         switcher.refresh()
     }
 
-    fun captureCurrentTab() {
-        val t = tabs.getOrNull(cur) ?: return
-        if (t.home) return
-        Thumbs.capture(t.webView, 0.45f)?.let { t.thumb = it }
+    /** 지금 탭 화면을 미리보기로 찍음 (웹페이지가 그대로 보일 때만). 끝나면 done */
+    fun captureCurrentTab(done: (() -> Unit)? = null) {
+        val t = tabs.getOrNull(cur)
+        if (t == null || t.home || !pageClearlyVisible()) { done?.invoke(); return }
+        Thumbs.capture(window, t.webView, 0.45f, null) { b ->
+            if (b != null) t.thumb = b
+            done?.invoke()
+        }
     }
+
+    /** 웹페이지 위를 덮는 화면(탭 목록·설정·이미지 화면 등)이 없는지 */
+    private fun pageClearlyVisible() = isShown && !switcher.isOpen && !pages.isOpen && !grabber.isOpen
 
     private fun closeOverlays() {
         if (switcher.isOpen) switcher.close()
@@ -1071,7 +1122,7 @@ class MainActivity : Activity() {
     }
 
     @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
-    private fun createWebView(): WebView = WebView(this).apply {
+    private fun createWebView(): WebView = LbWebView(this).apply {
         setBackgroundColor(col(R.color.bar))
         settings.apply {
             javaScriptEnabled = true
@@ -1172,9 +1223,10 @@ class MainActivity : Activity() {
     private fun snapshot(view: WebView, url: String) {
         if (!isCurrent(view) || view.url != url || switcher.isOpen) return
         val t = findTab(view) ?: return
-        Thumbs.capture(view, 0.45f)?.let { t.thumb = it }
+        if (!pageClearlyVisible()) return
+        Thumbs.capture(window, view, 0.45f, null) { b -> if (b != null) t.thumb = b }
         if (dialIndexByKey(url) >= 0 && !Thumbs.hasFresh(this, url, 3 * 3600_000L)) {
-            Thumbs.capture(view, 0.5f, Thumbs.DIAL_ASPECT)?.let { Thumbs.saveDial(this, url, it) }
+            Thumbs.capture(window, view, 0.5f, Thumbs.DIAL_ASPECT) { b -> if (b != null) Thumbs.saveDial(this, url, b) }
         }
     }
 
@@ -1196,7 +1248,6 @@ class MainActivity : Activity() {
             t.home = false
             t.openedByLink = true
             t.opener = findTab(view)
-            captureCurrentTab()
             tabs.getOrNull(cur)?.webView?.let { pauseTab(it) }
             val at = (t.opener?.let { tabs.indexOf(it) } ?: cur) + 1
             tabs.add(at.coerceIn(0, tabs.size), t)
@@ -1411,7 +1462,7 @@ class MainActivity : Activity() {
             val title = t.title.ifBlank { displayUrl(url) }.take(30)
             l.add(Store.Item(title, url))
             store.saveDials(l)
-            Thumbs.capture(t.webView, 0.5f, Thumbs.DIAL_ASPECT)?.let { Thumbs.saveDial(this, url, it) }
+            Thumbs.capture(window, t.webView, 0.5f, Thumbs.DIAL_ASPECT) { b -> if (b != null) Thumbs.saveDial(this, url, b) }
             showSnack("즐겨찾기에 추가했어요", "이름 바꾸기", 4_000) { editDial(store.dials().size - 1) }
         }
         updateUi()
@@ -1676,12 +1727,61 @@ class MainActivity : Activity() {
     /** 이미지 받기 완료: 앱 안에 완료 표시 (알림창 알림은 BgWork가 따로 띄움) */
     private fun onGrabFinished(j: GrabJob) {
         onJobsChanged()
+        if (j.pics.isNotEmpty() && j.fails == 0) {
+            // 전부 받았으면 압축 (설정에 따라 묻거나 자동)
+            when (store.autoZip) {
+                1 -> { grabber.zipAll(j, deleteAfter = true); return }
+                2 -> {}
+                else -> if (isShown) { askZip(j); return } else j.askZip = true
+            }
+        }
         if (!isShown) return
-        val msg = if (j.pics.isEmpty()) "'${j.title}' 받기 실패" else "'${j.title}' ${j.pics.size}장 받기 완료"
+        val msg = when {
+            j.pics.isEmpty() -> "'${j.title}' 받기 실패"
+            j.fails > 0 -> "'${j.title}' ${j.pics.size}장 받음 · 실패 ${j.fails}개 · 확인 후 압축하세요"
+            else -> "'${j.title}' ${j.pics.size}장 받기 완료"
+        }
         showSnack(msg, "보기", 6_000) {
             closeOverlays()
             grabber.openJob(j)
         }
+    }
+
+    /** 다 받았을 때: 압축하고 받은 이미지는 지울까요? (다음엔 묻지 않음) */
+    private fun askZip(j: GrabJob) {
+        j.askZip = false
+        if (JobStore.get(j.id) == null) return
+        val check = android.widget.CheckBox(this).apply {
+            text = "다음엔 묻지 않음"
+            setTextColor(col(R.color.text))
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(4), dp(20), 0)
+            addView(check)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("'${j.title}' ${j.pics.size}장 다 받았어요")
+            .setMessage("ZIP으로 압축하고, 받은 이미지는 지울까요?\n(압축 파일은 다운로드 폴더에 저장돼요)")
+            .setView(box)
+            .setPositiveButton("압축하고 지우기") { _, _ ->
+                if (check.isChecked) store.autoZip = 1
+                grabber.zipAll(j, deleteAfter = true)
+                toast("압축 중… 끝나면 알림이 떠요")
+            }
+            .setNegativeButton("그냥 두기") { _, _ ->
+                if (check.isChecked) store.autoZip = 2
+            }
+            .setNeutralButton("먼저 보기") { _, _ ->
+                closeOverlays()
+                grabber.openJob(j)
+            }
+            .show()
+    }
+
+    /** 앱에 돌아왔을 때 물어보지 못한 '압축할까요?'가 있으면 */
+    private fun askPendingZips() {
+        JobStore.jobs.firstOrNull { it.askZip && it.state == GrabJob.DONE }?.let { askZip(it) }
     }
 
     /** 알림 표시 권한, 배터리 최적화 제외 (백그라운드 작업이 끊기지 않게) */

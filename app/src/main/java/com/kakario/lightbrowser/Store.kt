@@ -83,6 +83,11 @@ class Store(ctx: Context) {
         get() = p.getInt("textZoom", 100)
         set(v) = p.edit().putInt("textZoom", v).apply()
 
+    /** 받기가 다 끝났을 때(실패 없음): 0 = 물어보기, 1 = 자동 압축 후 이미지 삭제, 2 = 그냥 두기 */
+    var autoZip: Int
+        get() = p.getInt("autoZip", 0)
+        set(v) = p.edit().putInt("autoZip", v).apply()
+
     var askedOverlay: Boolean
         get() = p.getBoolean("askedOverlay", false)
         set(v) = p.edit().putBoolean("askedOverlay", v).apply()

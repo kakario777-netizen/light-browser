@@ -101,7 +101,7 @@ class Collector(private val a: MainActivity) {
     fun miniPages(): List<WebView> = jobs.map { it.wv }
 
     fun miniLabels(): Map<WebView, String> = jobs.associate { j ->
-        j.wv to (if (j.paused) "멈춤 · " else "") + "${j.found.size}장 · 받음 ${j.grab?.pics?.size ?: 0}"
+        j.wv to (if (j.paused) "멈춤 · " else "화면 켜둠 · ") + "${j.found.size}장 · 받음 ${j.grab?.pics?.size ?: 0}"
     }
 
     fun hasJobs() = jobs.isNotEmpty()
@@ -323,13 +323,18 @@ class Collector(private val a: MainActivity) {
         val dl = if (g != null) " · 받음 ${g.pics.size}" + (if (g.fails > 0) " (실패 ${g.fails})" else "") else ""
         j.text = when {
             j.paused -> "멈췄어요: ${j.stopReason}\n${j.found.size}장 찾음$dl · 받기는 계속돼요"
-            j.auto -> "넘기며 모으는 중 · ${j.found.size}장 찾음$dl"
-            else -> "직접 넘기는 동안 모으는 중 · ${j.found.size}장 찾음$dl"
+            j.auto -> "넘기며 모으는 중 · ${j.found.size}장 찾음$dl\n모으는 동안 화면이 꺼지지 않아요"
+            else -> "직접 넘기는 동안 모으는 중 · ${j.found.size}장 찾음$dl\n모으는 동안 화면이 꺼지지 않아요"
         } + if (j.skipped > 0 && j.found.isEmpty()) "\n(이 사이트 이미지는 서버 주소가 없어 받을 수 없을 수 있어요)" else ""
     }
 
     /** 진행 상황을 알림·작업 아이콘에 알림 */
     private fun report() {
+        // 돌아가는 페이지는 웹 엔진에 계속 '보이는 중'으로, 멈추거나 끝난 건 원래대로
+        jobs.forEach { (it.wv as? LbWebView)?.keepVisible = it.running }
+        val anyRunning = jobs.any { it.running }
+        a.setKeepScreenOn(anyRunning)
+        a.parkCollecting()
         BgWork.collectJobs = jobs.count { it.running }
         BgWork.collectImages = jobs.filter { it.running }.sumOf { it.found.size }
         BgWork.sync(a)
@@ -366,6 +371,7 @@ class Collector(private val a: MainActivity) {
         j.paused = false
         main.removeCallbacks(j.loop)
         jobs.remove(j)
+        (j.wv as? LbWebView)?.keepVisible = false
         grabByView.remove(System.identityHashCode(j.wv))
         val g = j.grab
         log(j, "모으기 끝 · 찾은 이미지 ${j.found.size}장")
@@ -384,6 +390,7 @@ class Collector(private val a: MainActivity) {
         j.running = false
         main.removeCallbacks(j.loop)
         jobs.remove(j)
+        (j.wv as? LbWebView)?.keepVisible = false
         if (pending === j) pending = null
         grabByView.remove(System.identityHashCode(j.wv))
         j.grab?.let { JobStore.remove(it) }

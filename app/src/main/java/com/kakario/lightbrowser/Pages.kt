@@ -142,6 +142,19 @@ class Pages(private val a: MainActivity) {
             a.applyBypass(it, reload = true)
         }
 
+        section(body, "이미지 받기")
+        val zipNames = arrayOf("물어보기", "자동으로 압축하고 이미지 지우기", "그냥 두기")
+        var zipSub: TextView? = null
+        zipSub = row(body, "다 받으면 압축 (실패가 없을 때)", zipNames[st.autoZip.coerceIn(0, 2)], null) {
+            AlertDialog.Builder(a)
+                .setTitle("다 받으면 압축")
+                .setSingleChoiceItems(zipNames, st.autoZip.coerceIn(0, 2)) { d, w ->
+                    st.autoZip = w
+                    zipSub?.text = zipNames[w]
+                    d.dismiss()
+                }.show()
+        }
+
         section(body, "백그라운드 작업")
         row(body, "미니 창 (홈에서도 계속 모으기)",
             if (a.mini.canUse()) "허용됨 · 앱을 나가면 모으는 페이지가 작은 창으로 떠요" else "꺼짐 · 눌러서 '다른 앱 위에 표시' 허용", null) {

@@ -63,6 +63,40 @@ object Thumbs {
         }
     }
 
+    // ---------- 탭 미리보기 (앱을 다시 켜도 남게 파일로) ----------
+
+    private fun tabFile(ctx: Context, id: Long) = File(File(ctx.filesDir, "tabthumbs").apply { mkdirs() }, "$id.jpg")
+
+    fun saveTab(ctx: Context, id: Long, bmp: Bitmap) {
+        val f = tabFile(ctx, id)
+        Thread {
+            try {
+                FileOutputStream(f).use { bmp.compress(Bitmap.CompressFormat.JPEG, 80, it) }
+            } catch (e: Exception) {
+            }
+        }.start()
+    }
+
+    /** 저장해 둔 탭 미리보기 읽기 (백그라운드에서) */
+    fun loadTab(ctx: Context, id: Long): Bitmap? {
+        val f = tabFile(ctx, id)
+        return if (f.exists()) try { BitmapFactory.decodeFile(f.absolutePath) } catch (e: Throwable) { null } else null
+    }
+
+    fun deleteTab(ctx: Context, id: Long) {
+        tabFile(ctx, id).delete()
+    }
+
+    /** 지금 열린 탭이 아닌 미리보기 파일 지우기 */
+    fun cleanupTabs(ctx: Context, keep: Set<Long>) {
+        Thread {
+            File(ctx.filesDir, "tabthumbs").listFiles()?.forEach { f ->
+                val id = f.nameWithoutExtension.toLongOrNull()
+                if (id == null || id !in keep) f.delete()
+            }
+        }.start()
+    }
+
     fun hasFresh(ctx: Context, url: String, maxAgeMs: Long): Boolean {
         val f = file(ctx, url)
         return f.exists() && System.currentTimeMillis() - f.lastModified() < maxAgeMs

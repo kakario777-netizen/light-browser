@@ -121,17 +121,23 @@ class Store(ctx: Context) {
         set(v) = p.edit().putBoolean("darkPages", v).apply()
 
     // ---- 열린 탭 (앱을 다시 켜도 그대로) ----
-    fun saveSession(urls: List<String>, current: Int) {
+    /** (주소, 탭 고유 번호) 목록과 지금 탭 위치 */
+    fun saveSession(tabs: List<Pair<String, Long>>, current: Int) {
         val a = JSONArray()
-        urls.forEach { a.put(it) }
+        tabs.forEach { (u, id) -> a.put(JSONObject().put("u", u).put("id", id)) }
         p.edit().putString("session", a.toString()).putInt("sessionCur", current).apply()
     }
 
-    fun loadSession(): Pair<List<String>, Int> {
+    fun loadSession(): Pair<List<Pair<String, Long>>, Int> {
         val s = p.getString("session", null) ?: return Pair(emptyList(), 0)
         return try {
             val a = JSONArray(s)
-            Pair(List(a.length()) { a.getString(it) }, p.getInt("sessionCur", 0))
+            val list = List(a.length()) { i ->
+                // 예전 형식(주소만)도 읽음
+                val o = a.optJSONObject(i)
+                if (o != null) Pair(o.optString("u"), o.optLong("id", 0L)) else Pair(a.getString(i), 0L)
+            }
+            Pair(list, p.getInt("sessionCur", 0))
         } catch (e: Exception) {
             Pair(emptyList(), 0)
         }

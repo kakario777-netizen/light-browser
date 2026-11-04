@@ -71,6 +71,17 @@ class Tab(val webView: WebView) {
     var allowUrl: String? = null       // 사용자가 직접 입력한 주소는 차단하지 않음
     var dialogCount = 0                // 한 페이지에서 띄운 알림창 수
     var thumb: Bitmap? = null          // 탭 목록 미리보기
+    /** 탭 고유 번호 (미리보기 파일 이름, 앱을 다시 켜도 유지) */
+    var id: Long = newId()
+
+    companion object {
+        private var last = 0L
+        fun newId(): Long {
+            val now = System.currentTimeMillis() * 100
+            last = if (now > last) now else last + 1
+            return last
+        }
+    }
 }
 
 class MainActivity : Activity() {
@@ -151,9 +162,14 @@ class MainActivity : Activity() {
         if (urls.isEmpty()) {
             newTab(null)
         } else {
-            urls.forEach { newTab(if (it == HOME) null else it, select = false) }
+            urls.forEach { (u, id) ->
+                val t = newTab(if (u == HOME) null else u, select = false)
+                if (id > 0) t.id = id
+            }
             cur = idx.coerceIn(0, tabs.size - 1)
             showTab()
+            // 닫힌 탭의 미리보기 파일 정리
+            Thumbs.cleanupTabs(this, tabs.map { it.id }.toSet())
         }
         if (savedInstanceState == null) handleIntent(intent)
     }
@@ -300,14 +316,15 @@ class MainActivity : Activity() {
     }
 
     private fun saveSession() {
-        val urls = tabs.map { t ->
-            when {
+        val list = tabs.map { t ->
+            val u = when {
                 t.pendingUrl != null -> t.pendingUrl!!
                 t.home -> HOME
                 else -> t.webView.url ?: HOME
             }
+            Pair(u, t.id)
         }
-        store.saveSession(urls, cur)
+        store.saveSession(list, cur)
     }
 
     // ================= 화면 구성 =================
@@ -700,6 +717,28 @@ class MainActivity : Activity() {
         showTab()
     }
 
+    /** 탭 순서를 통째로 바꿈 (탭 목록에서 끌어서 옮겼을 때) */
+    fun reorderTabs(order: List<Tab>) {
+        if (order.size != tabs.size || order.toSet() != tabs.toSet()) return
+        val current = tabs.getOrNull(cur)
+        tabs.clear()
+        tabs.addAll(order)
+        cur = tabs.indexOf(current).coerceAtLeast(0)
+        updateUi()
+    }
+
+    /** 여러 탭 한꺼번에 닫기 (그룹 닫기) */
+    fun closeTabsNow(list: List<Tab>) {
+        list.toList().forEach { t -> tabs.indexOf(t).takeIf { it >= 0 }?.let { closeTab(it) } }
+    }
+
+    /** 같은 사이트끼리 묶는 열쇠 (네이버·구글 …). 새 탭은 모두 하나로 */
+    fun tabKey(t: Tab): String {
+        if (t.home) return "새 탭"
+        val u = t.pendingUrl ?: t.webView.url ?: return "새 탭"
+        return Thumbs.key(u).ifBlank { "새 탭" }
+    }
+
     fun moveTab(from: Int, to: Int) {
         if (from !in tabs.indices || to !in tabs.indices) return
         val current = tabs[cur]
@@ -758,7 +797,9 @@ class MainActivity : Activity() {
 
     private fun closeTab(i: Int) {
         if (i !in tabs.indices) return
-        detachTab(i).webView.destroy()
+        val t = detachTab(i)
+        t.webView.destroy()
+        Thumbs.deleteTab(this, t.id)
     }
 
     // 닫은 탭 되살리기용 (탭, 원래 위치, 현재 탭이었는지)
@@ -780,7 +821,10 @@ class MainActivity : Activity() {
     private fun finalizeClosed() {
         closedTimer?.let { frame.removeCallbacks(it) }
         closedTimer = null
-        closedTab?.first?.webView?.destroy()
+        closedTab?.first?.let {
+            it.webView.destroy()
+            Thumbs.deleteTab(this, it.id)
+        }
         closedTab = null
     }
 
@@ -808,7 +852,7 @@ class MainActivity : Activity() {
         val t = tabs.getOrNull(cur)
         if (t == null || t.home || !pageClearlyVisible()) { done?.invoke(); return }
         Thumbs.capture(window, t.webView, 0.45f, null) { b ->
-            if (b != null) t.thumb = b
+            if (b != null) { t.thumb = b; Thumbs.saveTab(this, t.id, b) }
             done?.invoke()
         }
     }
@@ -901,7 +945,7 @@ class MainActivity : Activity() {
             history.back() -> {}
             grabber.back() -> {}
             pages.back() -> {}
-            switcher.isOpen -> switcher.close()
+            switcher.isOpen -> switcher.back()
             address.hasFocus() -> leaveAddress()
             goBack() -> {}
             else -> moveTaskToBack(true)
@@ -1238,7 +1282,7 @@ class MainActivity : Activity() {
         if (!isCurrent(view) || view.url != url || switcher.isOpen) return
         val t = findTab(view) ?: return
         if (!pageClearlyVisible()) return
-        Thumbs.capture(window, view, 0.45f, null) { b -> if (b != null) t.thumb = b }
+        Thumbs.capture(window, view, 0.45f, null) { b -> if (b != null) { t.thumb = b; Thumbs.saveTab(this, t.id, b) } }
         if (dialIndexByKey(url) >= 0 && !Thumbs.hasFresh(this, url, 3 * 3600_000L)) {
             Thumbs.capture(window, view, 0.5f, Thumbs.DIAL_ASPECT) { b -> if (b != null) Thumbs.saveDial(this, url, b) }
         }

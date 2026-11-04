@@ -236,6 +236,7 @@ class Collector(private val a: MainActivity) {
     private fun report() {
         BgWork.collectJobs = jobs.count { it.running }
         BgWork.collectImages = jobs.filter { it.running }.sumOf { it.found.size }
+        BgWork.sync(a)
         a.onJobsChanged()
     }
 
@@ -248,14 +249,16 @@ class Collector(private val a: MainActivity) {
         main.removeCallbacks(j.loop)
         jobs.remove(j)
         val list = j.found.toList()
-        report()
         refreshBar()
         if (list.isEmpty()) {
+            report()
             if (a.isShown) a.toastMsg("모은 이미지가 없어요")
             return
         }
+        // 받기 작업을 먼저 만들고 나서 알림을 갱신해야, 화면이 꺼진 상태에서도 백그라운드 작업이 끊기지 않는다
         // 그 탭을 보고 있으면 받는 화면을 열고, 아니면 뒤에서 받기만
         a.openGrabberWith(list, j.startPage, j.wv.settings.userAgentString, j.title(), show = onScreen(j))
+        report()
         if (!onScreen(j) && a.isShown) a.snackMsg("'${j.title()}' 모으기 끝 · ${list.size}장 받는 중")
     }
 

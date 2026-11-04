@@ -36,6 +36,14 @@ class GrabJob(val id: Long, var title: String, val dir: File, val referer: Strin
     /** 페이지가 이미지를 불러올 때 앱이 같이 받아 둔 파일 (다시 요청하지 않고 그대로 씀) */
     val captured = java.util.concurrent.ConcurrentHashMap<String, File>()
     internal val failReason = HashMap<Int, Int>()   // 순번별 실패 이유 (메인 스레드)
+    /** 작업 기록 (넘기기·실패 상세). 여러 스레드에서 씀 */
+    val log = StringBuffer()
+
+    fun addLog(msg: String) {
+        if (log.length > 400_000) return   // 너무 커지지 않게
+        val t = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.KOREA).format(java.util.Date())
+        log.append(t).append("  ").append(msg).append('\n')
+    }
 
     class Pic(val url: String, val file: File, var selected: Boolean = true)
 
@@ -96,6 +104,7 @@ object JobStore {
 
     fun init(ctx: Context) {
         if (!::app.isInitialized) app = ctx.applicationContext
+        EngineFetch.init(ctx)
     }
 
     fun get(id: Long) = jobs.firstOrNull { it.id == id }
@@ -452,13 +461,48 @@ object JobStore {
         return File(j.dir, (i + 1).toString().padStart(4, '0') + "_" + clean)
     }
 
-    /** 받기 하나: 실패하면 2초·5초 뒤 두 번 더 시도 */
+    /** 응답을 사람이 읽을 수 있게 요약 (오류 로그용) */
+    private fun describe(c: HttpURLConnection, code: Int): String {
+        val sb = StringBuilder()
+        sb.append("HTTP ").append(code)
+        c.responseMessage?.takeIf { it.isNotBlank() }?.let { sb.append(' ').append(it) }
+        sb.append(" · 형식 ").append(c.contentType ?: "없음")
+        sb.append(" · 크기 ").append(c.contentLengthLong.let { if (it < 0) "?" else Downloads.size(it) })
+        c.getHeaderField("Server")?.let { sb.append(" · 서버 ").append(it) }
+        if (c.getHeaderField("CF-RAY") != null || c.getHeaderField("cf-mitigated") != null) sb.append(" · Cloudflare 보호")
+        c.getHeaderField("Location")?.let { sb.append(" · 이동 → ").append(it) }
+        // 오류 응답이 웹페이지면 제목을 읽어 둠 (예: "Just a moment..." = 보호 장치, "로그인")
+        val type = c.contentType ?: ""
+        if (type.contains("html", true)) {
+            try {
+                val body = (if (code >= 400) c.errorStream else c.inputStream)?.use { ins ->
+                    val buf = ByteArray(8192)
+                    val n = ins.read(buf).coerceAtLeast(0)
+                    String(buf, 0, n, Charsets.UTF_8)
+                } ?: ""
+                Regex("<title[^>]*>([^<]{1,120})", RegexOption.IGNORE_CASE).find(body)?.let {
+                    sb.append(" · 페이지 제목 \"").append(it.groupValues[1].trim()).append('"')
+                }
+            } catch (e: Exception) {
+            }
+        }
+        return sb.toString()
+    }
+
+    /**
+     * 받기 하나.
+     * 1) 페이지가 불러올 때 같이 받아 둔 파일이 있으면 그대로 사용
+     * 2) 없으면 같은 조건(머리말·쿠키)으로 직접 요청 — 연결 오류·서버 오류는 2초·5초 뒤 다시
+     * 3) 그래도 안 되면 브라우저 엔진으로 다시 (보호 장치가 앱 요청만 막는 경우)
+     * 실패하면 단계마다 상세 내용을 작업 기록에 남긴다.
+     */
     private fun fetch(j: GrabJob, i: Int, url: String, attempt: Int) {
         pool.execute {
             if (j.canceled) return@execute
             val f = fileFor(j, i, url)
-            var code = -1
-            // 1) 페이지가 불러올 때 앱이 같이 받아 둔 것이 있으면 그대로 사용 (다시 요청하지 않음)
+            val no = i + 1
+
+            // 1) 같이 받아 둔 파일
             var cap = j.captured[url]
             if (cap == null && j.state == GrabJob.COLLECTING && attempt == 1) {
                 // 화면에서 주소를 먼저 찾고 이미지가 아직 내려오는 중일 수 있어 잠깐 기다림
@@ -476,39 +520,84 @@ object JobStore {
                     return@execute
                 }
             }
-            // 2) 없으면 같은 조건(머리말·쿠키)으로 직접 요청
+
+            // 2) 직접 요청
+            var code = -1
+            var detail = ""
             try {
                 val c = open(j, url)
-                // 페이지가 그 이미지를 불러올 때 쓴 머리말을 그대로 (Referer 등)
                 j.headers[url]?.forEach { (k, v) ->
                     if (!k.equals("Range", true) && !k.equals("Accept-Encoding", true) && !k.equals("Cookie", true)) {
                         c.setRequestProperty(k, v)
                     }
                 }
                 code = c.responseCode
-                if (code in 200..299) {
-                    if ((c.contentType ?: "").contains("html", true)) code = -2
-                    else {
-                        c.inputStream.use { ins -> FileOutputStream(f).use { ins.copyTo(it, 64 * 1024) } }
-                        if (f.length() <= 0) code = -3
-                    }
+                if (code in 200..299 && !(c.contentType ?: "").contains("html", true)) {
+                    c.inputStream.use { ins -> FileOutputStream(f).use { ins.copyTo(it, 64 * 1024) } }
+                    if (f.length() <= 0) { code = -3; detail = "빈 파일이 왔어요" }
+                } else {
+                    detail = describe(c, code)
+                    if (code in 200..299) code = -2   // 이미지 대신 웹페이지
                 }
                 c.disconnect()
             } catch (e: Exception) {
                 code = -1
+                detail = e.javaClass.simpleName + ": " + (e.message ?: "")
             }
-            val ok = code in 200..299
-            if (!ok) {
-                f.delete()
-                // 일시적인 실패는 잠깐 쉬었다 다시
-                val retryable = code == -1 || code == 429 || code in 500..599 || code == 403
-                if (retryable && attempt < 3 && !j.canceled) {
-                    retryTimer.schedule(Runnable { fetch(j, i, url, attempt + 1) }, if (attempt == 1) 2L else 5L, java.util.concurrent.TimeUnit.SECONDS)
-                    return@execute
+            if (code in 200..299) {
+                main.post { fetched(j, i, url, f, true, code) }
+                return@execute
+            }
+            f.delete()
+            j.addLog("${no}번 직접 받기 실패 (시도 $attempt) · ${FailReason.short(code)} · $detail\n          $url")
+            val retryable = code == -1 || code == 429 || code in 500..599
+            if (retryable && attempt < 3 && !j.canceled) {
+                retryTimer.schedule(Runnable { fetch(j, i, url, attempt + 1) }, if (attempt == 1) 2L else 5L,
+                    java.util.concurrent.TimeUnit.SECONDS)
+                return@execute
+            }
+            if (code == 404 || code == 410) {
+                main.post { fetched(j, i, url, f, false, code) }
+                return@execute
+            }
+
+            // 3) 브라우저 엔진으로 다시
+            val referer = j.headers[url]?.entries?.firstOrNull { it.key.equals("Referer", true) }?.value ?: j.referer
+            j.addLog("${no}번 브라우저 엔진으로 다시 시도")
+            EngineFetch.enqueue(j, url, referer) { file, msg ->
+                // 메인 스레드
+                if (file != null && file.length() > 0 && (file.renameTo(f) || runCatching { file.copyTo(f, true) }.isSuccess)) {
+                    file.delete()
+                    j.addLog("${no}번 브라우저 엔진으로 받음")
+                    fetched(j, i, url, f, true, 200)
+                } else {
+                    file?.delete()
+                    j.addLog("${no}번 브라우저 엔진도 실패 · $msg")
+                    fetched(j, i, url, f, false, code)
                 }
             }
-            main.post { fetched(j, i, url, f, ok, code) }
         }
+    }
+
+    /** 작업 기록 전체 (저장·공유용) */
+    fun logText(j: GrabJob): String {
+        val sb = StringBuilder()
+        sb.append("라이트 브라우저 작업 기록\n")
+        sb.append("작업: ").append(j.title).append('\n')
+        sb.append("방식: ").append(j.how).append('\n')
+        sb.append("시작 페이지: ").append(j.referer ?: "-").append('\n')
+        sb.append("브라우저 정보: ").append(j.ua ?: "-").append('\n')
+        sb.append("상태: ").append(j.status.replace("\n", " ")).append('\n')
+        sb.append("전체 ").append(j.total).append(" · 받음 ").append(j.pics.size).append(" · 실패 ").append(j.fails).append('\n')
+        if (j.fails > 0) sb.append("실패 이유: ").append(j.failSummary()).append('\n')
+        sb.append("차단 우회: ").append(if (Bypass.port() != null) "켜짐" else "꺼짐").append('\n')
+        sb.append("\n---- 기록 ----\n")
+        sb.append(j.log)
+        if (j.failed.isNotEmpty()) {
+            sb.append("\n---- 실패한 이미지 ----\n")
+            failList(j).forEach { (i, url, code) -> sb.append(i + 1).append("번 ").append(FailReason.short(code)).append("  ").append(url).append('\n') }
+        }
+        return sb.toString()
     }
 
     private fun fetched(j: GrabJob, i: Int, url: String, f: File, ok: Boolean, code: Int) {

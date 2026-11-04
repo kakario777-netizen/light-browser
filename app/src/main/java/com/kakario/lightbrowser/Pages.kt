@@ -142,6 +142,22 @@ class Pages(private val a: MainActivity) {
             a.applyBypass(it, reload = true)
         }
 
+        section(body, "백그라운드 작업")
+        row(body, "미니 창 (홈에서도 계속 모으기)",
+            if (a.mini.canUse()) "허용됨 · 앱을 나가면 모으는 페이지가 작은 창으로 떠요" else "꺼짐 · 눌러서 '다른 앱 위에 표시' 허용", null) {
+            a.mini.askPermission()
+        }
+        row(body, "배터리 최적화에서 빼기", "화면이 꺼져도 작업이 끊기지 않게", null) {
+            try {
+                @android.annotation.SuppressLint("BatteryLife")
+                val i = android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    android.net.Uri.parse("package:" + a.packageName))
+                a.startActivity(i)
+            } catch (e: Exception) {
+                a.toastMsg("설정 화면을 열 수 없어요")
+            }
+        }
+
         section(body, "다운로드")
         row(body, "다운로드 보기", "받는 중인 파일과 받은 파일", null) { openDownloads() }
         var folderSub: TextView? = null

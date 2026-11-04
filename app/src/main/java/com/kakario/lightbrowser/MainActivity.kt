@@ -135,6 +135,7 @@ class MainActivity : Activity() {
         setupWindow()
         switcher = TabSwitcher(this)
         pages = Pages(this)
+        mini = MiniWindow(this)
         collector = Collector(this)
         grabber = Grabber(this)
         JobStore.listeners.add(jobsListener)
@@ -193,6 +194,35 @@ class MainActivity : Activity() {
     var isShown = false
         private set
 
+    /** 홈·다른 앱 위에 띄우는 작은 창 (넘기며 모으는 페이지를 계속 '보이게' 둠) */
+    lateinit var mini: MiniWindow
+
+    override fun onStop() {
+        super.onStop()
+        // 넘기며 모으는 중이면 페이지를 미니 창으로 옮겨서 계속 움직이게 함
+        if (::collector.isInitialized && collector.hasJobs() && mini.canUse()) {
+            val labels = collector.miniLabels()
+            val pages = collector.miniPages()
+            mini.show(pages.map { w -> w to pageSize(w) }, pages.map { labels[it] ?: "" })
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // 돌아오면 미니 창의 페이지를 원래 자리로
+        if (::mini.isInitialized && mini.isShowing) {
+            mini.hide()
+            if (tabs.isNotEmpty()) showTab()
+        }
+    }
+
+    /** 웹뷰의 원래 크기 (탭 화면 크기) */
+    private fun pageSize(w: WebView): Pair<Int, Int> {
+        val cw = content.width.takeIf { it > 0 } ?: resources.displayMetrics.widthPixels
+        val ch = content.height.takeIf { it > 0 } ?: (resources.displayMetrics.heightPixels * 0.8f).toInt()
+        return Pair(w.width.takeIf { it > 0 } ?: cw, w.height.takeIf { it > 0 } ?: ch)
+    }
+
     override fun onPause() {
         super.onPause()
         isShown = false
@@ -210,6 +240,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        if (::mini.isInitialized) mini.hide()
         tabs.forEach { it.webView.destroy() }
         closedTab?.first?.webView?.destroy()
         if (Downloads.onFinish != null) Downloads.onFinish = null
@@ -1660,6 +1691,20 @@ class MainActivity : Activity() {
         ) {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 9)
         }
+        if (!mini.canUse() && !store.askedOverlay) {
+            store.askedOverlay = true
+            AlertDialog.Builder(this)
+                .setTitle("홈에 나가 있어도 계속 모으려면")
+                .setMessage("웹 엔진은 화면에 보이는 페이지만 제대로 움직여요. 앱을 나가면 모으는 페이지를 다른 앱 위에 작은 창으로 띄워 두도록 '다른 앱 위에 표시'를 허용해 주세요.\n\n(나중에 설정 › 미니 창에서도 허용할 수 있어요)")
+                .setPositiveButton("허용하러 가기") { _, _ -> mini.askPermission() }
+                .setNegativeButton("나중에") { _, _ -> askBattery() }
+                .show()
+            return
+        }
+        askBattery()
+    }
+
+    private fun askBattery() {
         val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
         if (!pm.isIgnoringBatteryOptimizations(packageName) && !store.askedBattery) {
             store.askedBattery = true

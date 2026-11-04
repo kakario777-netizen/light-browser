@@ -354,8 +354,49 @@ class Grabber(private val a: MainActivity) {
             .setTitle("실패한 이미지 ${list.size}개")
             .setView(ScrollView(a).apply { addView(body) })
             .setPositiveButton("다시 받기") { _, _ -> JobStore.retryFailed(j) }
+            .setNeutralButton("오류 기록 저장") { _, _ -> saveLog(j) }
             .setNegativeButton("닫기", null)
             .show()
+    }
+
+    /** 작업 기록(넘기기·실패 상세)을 보기 */
+    private fun showLog(j: GrabJob) {
+        val text = JobStore.logText(j)
+        val tv = TextView(a).apply {
+            this.text = text
+            textSize = 11f
+            setTextColor(a.getColor(R.color.text))
+            setTextIsSelectable(true)
+            setPadding(a.dp(18), a.dp(8), a.dp(18), a.dp(8))
+            typeface = Typeface.MONOSPACE
+        }
+        AlertDialog.Builder(a)
+            .setTitle("작업 기록")
+            .setView(ScrollView(a).apply { addView(tv) })
+            .setPositiveButton("파일로 저장") { _, _ -> saveLog(j) }
+            .setNeutralButton("공유") { _, _ ->
+                try {
+                    a.startActivity(android.content.Intent.createChooser(
+                        android.content.Intent(android.content.Intent.ACTION_SEND).setType("text/plain")
+                            .putExtra(android.content.Intent.EXTRA_TEXT, text.take(90_000)), "작업 기록 공유"))
+                } catch (e: Exception) {
+                    a.toastMsg("공유할 앱이 없어요")
+                }
+            }
+            .setNegativeButton("닫기", null)
+            .show()
+    }
+
+    /** 작업 기록을 다운로드 폴더에 txt로 저장 */
+    private fun saveLog(j: GrabJob) {
+        val bytes = JobStore.logText(j).toByteArray(Charsets.UTF_8)
+        val stamp = java.text.SimpleDateFormat("MMdd_HHmm", java.util.Locale.KOREA).format(java.util.Date())
+        val name = j.title.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(40) + "_기록_" + stamp + ".txt"
+        Downloads.saveWith(a, name, "text/plain", bytes.size.toLong(), { out, progress ->
+            out.write(bytes)
+            progress(bytes.size.toLong())
+        })
+        a.toastMsg("다운로드 폴더에 저장할게요: $name")
     }
 
     private fun header(title: String, onBack: () -> Unit, right: View? = null): Pair<LinearLayout, TextView> {
@@ -392,7 +433,17 @@ class Grabber(private val a: MainActivity) {
             a.ripple(this)
             setOnClickListener { closeView(); openList() }
         }
-        val (head, t) = header(j.title, { closeView() }, listBtn)
+        val right = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL }
+        right.addView(TextView(a).apply {
+            text = "기록"
+            textSize = 13f
+            setTextColor(a.getColor(R.color.accent))
+            setPadding(a.dp(10), a.dp(10), a.dp(6), a.dp(10))
+            a.ripple(this)
+            setOnClickListener { job?.let { showLog(it) } }
+        })
+        right.addView(listBtn)
+        val (head, t) = header(j.title, { closeView() }, right)
         titleText = t
         box.addView(head)
 

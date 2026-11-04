@@ -79,7 +79,32 @@ class Collector(private val a: MainActivity) {
 
     private fun jobOf(w: WebView?) = jobs.firstOrNull { it.wv === w }
 
-    private fun onScreen(j: Job) = a.isShown && a.currentWebView() === j.wv
+    /** 웹 엔진이 그 페이지를 '보이는 페이지'로 다루는지: 앱에서 보고 있거나 미니 창에 떠 있으면 */
+    private fun onScreen(j: Job) = (a.isShown && a.currentWebView() === j.wv) || a.mini.hosts(j.wv)
+
+    private fun screenOn() = (a.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager).isInteractive
+
+    /** 기록에 남길 지금 상태 */
+    private fun where(j: Job) = when {
+        !screenOn() -> "화면 꺼짐"
+        a.isShown && a.currentWebView() === j.wv -> "화면에 보임"
+        a.mini.hosts(j.wv) -> "미니 창"
+        a.isShown -> "다른 탭"
+        else -> "앱 밖(홈·다른 앱)"
+    }
+
+    private fun log(j: Job, msg: String) = j.grab?.addLog(msg)
+
+    private val methodName = arrayOf("실제 터치", "페이지 안 클릭", "페이지 안 터치 신호")
+
+    /** 미니 창으로 옮길 작업들 (돌아가는 것 + 멈춘 것) */
+    fun miniPages(): List<WebView> = jobs.map { it.wv }
+
+    fun miniLabels(): Map<WebView, String> = jobs.associate { j ->
+        j.wv to (if (j.paused) "멈춤 · " else "") + "${j.found.size}장 · 받음 ${j.grab?.pics?.size ?: 0}"
+    }
+
+    fun hasJobs() = jobs.isNotEmpty()
 
     // ================= 이미지 요청 머리말 기록 =================
 
@@ -138,6 +163,8 @@ class Collector(private val a: MainActivity) {
         val g = JobStore.startCollecting(j.title(), j.startPage, j.wv.settings.userAgentString)
         j.grab = g
         grabByView[System.identityHashCode(j.wv)] = g
+        g.addLog("모으기 시작 · " + (if (autoTap) "자동으로 넘김 (누르는 자리 ${j.tapX.toInt()},${j.tapY.toInt()})" else "직접 넘김") +
+            " · 페이지 ${j.wv.url}")
         j.found.forEach { JobStore.add(g, it) }
         jobs.add(j)
         run(j)
@@ -215,6 +242,8 @@ class Collector(private val a: MainActivity) {
             else -> j.failedTaps % 3
         }
         j.lastMethod = m
+        log(j, "넘기기 ${j.pages}쪽 → 다음 · 방식: ${methodName[m]} · ${where(j)}" +
+            if (j.failedTaps > 0) " · 새 이미지 없이 ${j.failedTaps}번째 다시 시도" else "")
         if (m == 1 || m == 2) {
             jsTap(j, m)
             return
@@ -270,6 +299,7 @@ class Collector(private val a: MainActivity) {
                         if (u.startsWith("http")) {
                             if (j.found.add(u)) {
                                 j.lastNewAt = SystemClock.uptimeMillis()
+                                log(j, "새 이미지 ${j.found.size}번째 찾음 (${where(j)}) $u")
                                 j.grab?.let { g -> if (j.running) JobStore.add(g, u) }
                             }
                         } else if (u.startsWith("blob:") || u.startsWith("data:")) {
@@ -304,6 +334,7 @@ class Collector(private val a: MainActivity) {
         BgWork.collectImages = jobs.filter { it.running }.sumOf { it.found.size }
         BgWork.sync(a)
         a.onJobsChanged()
+        if (a.mini.isShowing) a.mini.updateLabels(miniLabels())
     }
 
     // ================= 멈춤·이어하기·끝 =================
@@ -313,6 +344,7 @@ class Collector(private val a: MainActivity) {
         j.running = false
         j.paused = true
         j.stopReason = reason
+        log(j, "멈춤 · $reason · ${where(j)} · 지금 페이지 ${j.wv.url}")
         main.removeCallbacks(j.loop)
         updateText(j)
         report()
@@ -322,6 +354,7 @@ class Collector(private val a: MainActivity) {
 
     fun resume(j: Job) {
         if (!jobs.contains(j) || j.running) return
+        log(j, "이어 넘기기 · ${where(j)}")
         run(j)
     }
 
@@ -335,6 +368,7 @@ class Collector(private val a: MainActivity) {
         jobs.remove(j)
         grabByView.remove(System.identityHashCode(j.wv))
         val g = j.grab
+        log(j, "모으기 끝 · 찾은 이미지 ${j.found.size}장")
         refreshBar()
         if (g != null) {
             JobStore.endCollecting(g)   // 받기 작업이 남아 있으면 계속 (알림 유지를 위해 먼저)

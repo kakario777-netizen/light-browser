@@ -56,7 +56,13 @@ object Downloads {
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences("downloads", Context.MODE_PRIVATE)
 
+    private var appCtx: Context? = null
+    /** 작업 현황 아이콘 갱신용 */
+    var onActivity: (() -> Unit)? = null
+    private var lastSync = 0L
+
     fun init(ctx: Context) {
+        appCtx = ctx.applicationContext
         if (loaded) return
         loaded = true
         try {
@@ -86,11 +92,22 @@ object Downloads {
         prefs(ctx).edit().putString("list", a.toString()).apply()
     }
 
-    private fun changed() = main.post { onChange?.invoke() }
+    private fun changed() = main.post {
+        onChange?.invoke()
+        onActivity?.invoke()
+        val now = System.currentTimeMillis()
+        if (now - lastSync > 700) {
+            lastSync = now
+            appCtx?.let { BgWork.sync(it) }
+        }
+    }
 
     private fun finished(ctx: Context, it: Item) = main.post {
         save(ctx)
         onChange?.invoke()
+        onActivity?.invoke()
+        BgWork.sync(ctx)
+        if (it.state != CANCELED) BgWork.fileDone(ctx, it)
         onFinish?.invoke(it)
     }
 

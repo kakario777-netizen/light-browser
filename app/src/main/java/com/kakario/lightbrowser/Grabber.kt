@@ -1,5 +1,6 @@
 package com.kakario.lightbrowser
 
+import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -12,25 +13,19 @@ import android.os.Looper
 import android.text.TextUtils
 import android.util.LruCache
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.webkit.CookieManager
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.InetSocketAddress
-import java.net.Proxy
-import java.net.URI
-import java.net.URL
-import java.net.URLDecoder
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.Deflater
@@ -38,147 +33,79 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 /**
- * 이미지 폴더 받기.
- * 1) 이미지가 들어 있는 서버 폴더의 파일 목록을 열어 이미지를 모두 찾는다
- * 2) 목록이 막혀 있으면 파일 이름의 번호를 앞뒤로 이어 가며 찾는다 (001, 002 …)
- * 받은 이미지는 격자로 보여주고, 고른 것만 ZIP으로 압축하거나 낱개로 저장한다.
+ * 이미지 받기 화면.
+ *  - 작업 하나 보기: 찾는 중·받는 중 진행 상황, 받은 이미지 격자에서 고르고 ZIP·낱개 저장
+ *  - 작업 목록: 넘기며 모으기·이미지 받기·파일 다운로드를 한눈에
+ * 작업 자체는 JobStore에서 돌아가므로 화면을 닫아도 계속 받는다.
  */
 class Grabber(private val a: MainActivity) {
     private val main = Handler(Looper.getMainLooper())
-    private val pool = Executors.newFixedThreadPool(4)
     private val thumbPool = Executors.newFixedThreadPool(2)
 
+    // 작업 보기 화면
     private var root: View? = null
+    private var job: GrabJob? = null
+    private var titleText: TextView? = null
     private var statusText: TextView? = null
     private var bar: ProgressBar? = null
     private var actions: LinearLayout? = null
     private var failBox: LinearLayout? = null
     private var grid: RecyclerView? = null
     private var preview: View? = null
+    private var shownPics = 0
+    private var confirmShownFor = -1L
 
-    @Volatile private var canceled = false
-    private var dir: File? = null
-    private var referer: String? = null
-    private var ua: String? = null
-    private var title = "images"
+    // 작업 목록 화면
+    private var listRoot: View? = null
+    private var listBody: LinearLayout? = null
 
-    class Pic(val url: String, val file: File, var selected: Boolean = true)
-
-    private val pics = mutableListOf<Pic>()
     private val adapter = Adapter()
     private val cache = object : LruCache<String, Bitmap>(24 * 1024 * 1024) {
         override fun sizeOf(key: String, value: Bitmap) = value.byteCount
     }
 
-    val isOpen get() = root != null
+    private val listener: (GrabJob?) -> Unit = { j -> onJobChanged(j) }
+
+    val isOpen get() = root != null || listRoot != null
+
+    init {
+        JobStore.init(a)
+        JobStore.listeners.add(listener)
+        // 찾기가 끝났을 때: 지금 그 작업을 보고 있으면 확인 창, 아니면 바로 받기
+        JobStore.onFound = { j ->
+            if (job === j && root != null && a.isShown) confirmDownload(j) else JobStore.download(j)
+        }
+    }
+
+    fun release() {
+        JobStore.listeners.remove(listener)
+        JobStore.onFound = null
+    }
 
     // ================= 시작 =================
-
-    /** imageUrl: 기준 이미지 주소, pageUrl: 지금 페이지(Referer로 씀) */
-    private fun prepare(name: String, pageUrl: String?, userAgent: String?) {
-        if (isOpen) close()
-        referer = pageUrl
-        ua = userAgent
-        canceled = false
-        pics.clear()
-        cache.evictAll()
-        title = name
-        dir = File(a.cacheDir, "grab/" + System.currentTimeMillis()).apply { mkdirs() }
-        buildUi()
-    }
-
-    /** 넘기며 모으기 등에서 이미 주소 목록을 가진 경우 */
-    /** 화면이 꺼진 채로 받는 중인지 (알림창으로 진행 상황 표시) */
-    private var bgMode = false
-
-    fun startWithUrls(urls: List<String>, pageUrl: String?, userAgent: String?, name: String, autoStart: Boolean = false) {
-        prepare(name, pageUrl, userAgent)
-        if (urls.isEmpty()) {
-            showFail("모은 이미지가 없어요.", null)
-            return
-        }
-        if (autoStart) {
-            bgMode = true
-            if (!BgWork.running) BgWork.start(a, "이미지 받는 중", collecting = false)
-            BgWork.onStop = null
-            BgWork.onCancel = { main.post { close() } }
-            downloadAll(urls)
-        } else confirmDownload(urls, "넘기며 모으기")
-    }
 
     fun start(imageUrl: String, pageUrl: String?, userAgent: String?) {
         if (!imageUrl.startsWith("http")) {
             a.toastMsg("이 이미지는 서버 주소가 없어서 폴더를 찾을 수 없어요. '넘기며 모으기'를 써 보세요")
             return
         }
-        val folder = folderOf(imageUrl)
-        prepare(folderName(folder), pageUrl, userAgent)
-        setStatus("폴더 확인 중…\n$folder", indeterminate = true)
-
-        Thread {
-            var urls: List<String> = emptyList()
-            var how = ""
-            try {
-                urls = listFolder(folder)
-                if (urls.isNotEmpty()) how = "폴더 목록"
-            } catch (e: Exception) {
-            }
-            if (urls.isEmpty() && !canceled) {
-                main.post { setStatus("폴더 목록이 막혀 있어요. 번호로 이어 찾는 중…", indeterminate = true) }
-                val run = lastRunInFile(imageUrl)
-                if (run != null) {
-                    urls = sequence(imageUrl, run, maxMiss = 8, tryExts = false, strip = false)
-                    if (urls.size > 1) how = "번호 이어 찾기"
-                }
-            }
-            main.post {
-                if (canceled || !isOpen) return@post
-                when {
-                    urls.size <= 1 -> showFail(
-                        "이 폴더에서는 이미지를 더 찾지 못했어요.\n" +
-                            "주소를 나눠 보고 다른 번호로 찾거나, 페이지를 넘기며 모아 보세요.", imageUrl
-                    )
-                    else -> confirmDownload(urls, how)
-                }
-            }
-        }.start()
+        val j = JobStore.create(JobStore.folderName(JobStore.folderOf(imageUrl)), pageUrl, userAgent)
+        openJob(j)
+        JobStore.findFolder(j, imageUrl)
     }
 
-    /** 못 찾았을 때: 주소 분석 / 넘기며 모으기 버튼 */
-    private fun showFail(msg: String, imageUrl: String?) {
-        setStatus(msg, indeterminate = false)
-        val box = failBox ?: return
-        box.removeAllViews()
-        box.visibility = View.VISIBLE
-        if (imageUrl != null) {
-            box.addView(button("주소 분석해서 찾기", filled = true) { analyze(imageUrl, referer, ua) },
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, a.dp(46)).apply { bottomMargin = a.dp(8) })
-        }
-        box.addView(button("페이지 넘기며 모으기", filled = imageUrl == null) {
-            close()
-            a.startCollector()
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, a.dp(46)))
+    /** 넘기며 모으기 결과: 묻지 않고 바로 받기 시작 */
+    fun startWithUrls(urls: List<String>, pageUrl: String?, userAgent: String?, name: String, show: Boolean): GrabJob? {
+        if (urls.isEmpty()) return null
+        val j = JobStore.create(name, pageUrl, userAgent)
+        j.how = "넘기며 모으기"
+        JobStore.download(j, urls)
+        if (show) openJob(j)
+        return j
     }
 
     // ================= 주소 분석 =================
 
-    private class Run(val start: Int, val end: Int)
-
-    /** 주소에서 사이트 이름 뒤에 있는 숫자 덩어리들 */
-    private fun runs(url: String): List<Run> {
-        val hostEnd = url.indexOf('/', url.indexOf("://") + 3).let { if (it < 0) url.length else it }
-        return Regex("\\d+").findAll(url).filter { it.range.first >= hostEnd && it.value.length <= 12 }
-            .map { Run(it.range.first, it.range.last + 1) }.toList()
-    }
-
-    /** 파일 이름 안의 마지막 숫자 (기본 선택) */
-    private fun lastRunInFile(url: String): Run? {
-        val q = url.indexOf('?').let { if (it < 0) url.length else it }
-        val fileStart = url.lastIndexOf('/', q - 1) + 1
-        return runs(url).lastOrNull { it.start >= fileStart && it.end <= q }
-    }
-
-    /** 이미지 주소를 나눠 보여주고, 어느 번호를 바꿔 가며 찾을지 고르게 한다 */
     fun analyze(imageUrl: String, pageUrl: String?, userAgent: String?) {
         if (!imageUrl.startsWith("http")) {
             a.toastMsg("이 이미지는 서버 주소가 없어요. '넘기며 모으기'를 써 보세요")
@@ -189,7 +116,7 @@ class Grabber(private val a: MainActivity) {
         val pathPart = if (q >= 0) imageUrl.substring(0, q) else imageUrl
         val fileName = pathPart.substringAfterLast('/')
         val ext = fileName.substringAfterLast('.', "").lowercase()
-        val allRuns = runs(imageUrl)
+        val allRuns = JobStore.runs(imageUrl)
 
         val body = LinearLayout(a).apply {
             orientation = LinearLayout.VERTICAL
@@ -210,7 +137,7 @@ class Grabber(private val a: MainActivity) {
         if (q >= 0) body.addView(label("뒤에 붙은 값   " + imageUrl.substring(q)))
 
         val group = android.widget.RadioGroup(a)
-        val def = lastRunInFile(imageUrl) ?: allRuns.lastOrNull()
+        val def = JobStore.lastRunInFile(imageUrl) ?: allRuns.lastOrNull()
         if (allRuns.isEmpty()) {
             body.addView(label("\n주소에 번호가 없어서 이어 찾기를 할 수 없어요.\n'페이지 넘기며 모으기'를 써 보세요.", color = R.color.sub))
         } else {
@@ -239,7 +166,6 @@ class Grabber(private val a: MainActivity) {
         }
         val stripBox = android.widget.CheckBox(a).apply {
             text = "뒤에 붙은 크기 조절 값 떼고 원본 찾기"
-            isChecked = false
             setTextColor(a.getColor(R.color.text))
         }
         val missGroup = android.widget.RadioGroup(a).apply { orientation = android.widget.RadioGroup.HORIZONTAL }
@@ -261,297 +187,151 @@ class Grabber(private val a: MainActivity) {
 
         val b = AlertDialog.Builder(a)
             .setTitle("이미지 주소 분석")
-            .setView(android.widget.ScrollView(a).apply { addView(body) })
+            .setView(ScrollView(a).apply { addView(body) })
             .setNegativeButton("닫기", null)
             .setNeutralButton("넘기며 모으기") { _, _ ->
-                close()
+                closeView()
                 a.startCollector()
             }
         if (allRuns.isNotEmpty()) b.setPositiveButton("찾기") { _, _ ->
             val run = allRuns.getOrNull(group.checkedRadioButtonId - 100) ?: def ?: return@setPositiveButton
             val miss = misses.getOrElse(missGroup.checkedRadioButtonId - 200) { 20 }
-            runAnalyzed(imageUrl, pageUrl, userAgent, run, miss, extBox.isChecked, stripBox.isChecked && q >= 0)
+            val j = JobStore.create(JobStore.folderName(JobStore.folderOf(imageUrl)), pageUrl, userAgent)
+            openJob(j)
+            JobStore.findSequence(j, imageUrl, run, miss, extBox.isChecked, stripBox.isChecked && q >= 0)
         }
         b.show()
     }
 
-    private fun runAnalyzed(url: String, pageUrl: String?, userAgent: String?, run: Run, miss: Int, exts: Boolean, strip: Boolean) {
-        prepare(folderName(folderOf(url)), pageUrl, userAgent)
-        setStatus("번호로 이어 찾는 중…", indeterminate = true)
-        Thread {
-            val urls = sequence(url, run, miss, exts, strip)
-            main.post {
-                if (canceled || !isOpen) return@post
-                if (urls.size <= 1) showFail("이 번호로는 이미지를 더 찾지 못했어요.\n다른 번호를 골라 보거나 넘기며 모아 보세요.", url)
-                else confirmDownload(urls, "번호 이어 찾기")
-            }
-        }.start()
-    }
-
-    private fun confirmDownload(urls: List<String>, how: String) {
-        failBox?.visibility = View.GONE
-        setStatus("$how 으로 이미지 ${urls.size}개를 찾았어요", indeterminate = false)
+    private fun confirmDownload(j: GrabJob) {
+        if (confirmShownFor == j.id) return
+        confirmShownFor = j.id
         AlertDialog.Builder(a)
-            .setTitle("이미지 ${urls.size}개")
-            .setMessage("$title\n\n모두 받은 뒤 확인하고 고를 수 있어요.")
-            .setPositiveButton("받기") { _, _ -> downloadAll(urls) }
-            .setNegativeButton("취소") { _, _ -> close() }
+            .setTitle("이미지 ${j.urls.size}개")
+            .setMessage("${j.title}\n\n모두 받은 뒤 확인하고 고를 수 있어요.")
+            .setPositiveButton("받기") { _, _ -> JobStore.download(j) }
+            .setNegativeButton("취소") { _, _ ->
+                JobStore.remove(j)
+                closeView()
+            }
             .setCancelable(false)
             .show()
     }
 
-    // ================= 주소 다루기 =================
+    // ================= 작업 하나 보기 =================
 
-    private fun folderOf(url: String): String {
-        val u = URI(url)
-        val path = (u.rawPath ?: "/").substringBeforeLast('/') + "/"
-        return URI(u.scheme, u.rawAuthority, null, null, null).toString().removeSuffix("/") + path
+    fun openJobById(id: Long) {
+        val j = JobStore.get(id)
+        if (j == null) { openList(); return }
+        openJob(j)
     }
 
-    private fun folderName(folder: String): String {
-        val p = Uri.parse(folder).pathSegments.lastOrNull()
-        val n = try { URLDecoder.decode(p ?: "", "UTF-8") } catch (e: Exception) { p ?: "" }
-        return n.ifBlank { Uri.parse(folder).host ?: "images" }
+    fun openJob(j: GrabJob) {
+        closeView()
+        job = j
+        j.seen = true
+        BgWork.clearJob(a, j.id)
+        cache.evictAll()
+        shownPics = -1
+        buildUi(j)
+        render()
+        if (j.state == GrabJob.FOUND && a.isShown) confirmDownload(j)
     }
 
-    private val imgExt = Regex("\\.(jpe?g|png|gif|webp|bmp|avif|heic|jfif)$", RegexOption.IGNORE_CASE)
-
-    private fun isImageUrl(u: String) = imgExt.containsMatchIn(Uri.parse(u).path ?: "")
-
-    private fun open(url: String, method: String = "GET"): HttpURLConnection {
-        val port = Bypass.port()
-        val c = (if (port != null) URL(url).openConnection(Proxy(Proxy.Type.HTTP, InetSocketAddress("127.0.0.1", port)))
-        else URL(url).openConnection()) as HttpURLConnection
-        c.requestMethod = method
-        c.connectTimeout = 15000
-        c.readTimeout = 30000
-        c.instanceFollowRedirects = true
-        ua?.let { c.setRequestProperty("User-Agent", it) }
-        referer?.let { c.setRequestProperty("Referer", it) }
-        CookieManager.getInstance().getCookie(url)?.let { c.setRequestProperty("Cookie", it) }
-        return c
+    private fun onJobChanged(j: GrabJob?) {
+        if (root != null && (j == null || j === job)) render()
+        if (listRoot != null) renderList()
     }
 
-    // ================= 1) 폴더 목록 =================
-
-    /** 폴더 주소를 열어 파일 목록(Index of …)이 나오면 그 안의 이미지를 모은다. 하위 폴더도 3단계까지 */
-    private fun listFolder(folder: String): List<String> {
-        val found = LinkedHashSet<String>()
-        val seen = HashSet<String>()
-        fun walk(dirUrl: String, depth: Int) {
-            if (canceled || !seen.add(dirUrl) || found.size >= 5000) return
-            val c = open(dirUrl)
-            if (c.responseCode != 200) { c.disconnect(); return }
-            val type = c.contentType ?: ""
-            if (!type.contains("html", true)) { c.disconnect(); return }
-            val html = c.inputStream.bufferedReader().use { it.readText() }
-            c.disconnect()
-            val base = URI(dirUrl)
-            val subs = mutableListOf<String>()
-            val files = mutableListOf<String>()
-            for (m in Regex("href\\s*=\\s*[\"']([^\"'#?]+)[\"']", RegexOption.IGNORE_CASE).findAll(html)) {
-                val h = m.groupValues[1]
-                if (h.startsWith("javascript:") || h.startsWith("mailto:")) continue
-                val abs = try { base.resolve(h.replace(" ", "%20")).toString() } catch (e: Exception) { continue }
-                // 같은 폴더 아래에 있는 것만 (상위 폴더·다른 사이트 링크 제외)
-                if (!abs.startsWith(dirUrl) || abs == dirUrl) continue
-                if (abs.endsWith("/")) subs.add(abs)
-                else if (isImageUrl(abs)) files.add(abs)
+    private fun render() {
+        val j = job ?: return
+        titleText?.text = j.title
+        statusText?.text = j.status
+        val b = bar
+        failBox?.visibility = View.GONE
+        actions?.visibility = View.GONE
+        when (j.state) {
+            GrabJob.FINDING -> { b?.visibility = View.VISIBLE; b?.isIndeterminate = true }
+            GrabJob.FOUND -> b?.visibility = View.GONE
+            GrabJob.DOWNLOADING -> {
+                b?.visibility = View.VISIBLE
+                b?.isIndeterminate = false
+                b?.max = j.total.coerceAtLeast(1)
+                b?.progress = j.done
             }
-            files.sortedWith(natural).forEach { found.add(it) }
-            if (depth < 3) subs.distinct().sortedWith(natural).forEach { walk(it, depth + 1) }
-        }
-        walk(folder, 0)
-        return found.toList()
-    }
-
-    /** 1, 2, 10 순서로 (문자 순서면 1, 10, 2가 됨) */
-    private val natural = Comparator<String> { x, y ->
-        val rx = Regex("(\\d+)|(\\D+)")
-        val px = rx.findAll(x.lowercase()).map { it.value }.toList()
-        val py = rx.findAll(y.lowercase()).map { it.value }.toList()
-        for (i in 0 until minOf(px.size, py.size)) {
-            val p = px[i]; val q = py[i]
-            val c = if (p[0].isDigit() && q[0].isDigit()) {
-                val d = p.trimStart('0').length - q.trimStart('0').length
-                if (d != 0) d else p.trimStart('0').compareTo(q.trimStart('0'))
-            } else p.compareTo(q)
-            if (c != 0) return@Comparator c
-        }
-        px.size - py.size
-    }
-
-    // ================= 2) 번호 이어 찾기 =================
-
-    private val exts = listOf("jpg", "jpeg", "png", "webp", "gif")
-    private val extRe = Regex("\\.(jpe?g|png|webp|gif|bmp)$", RegexOption.IGNORE_CASE)
-
-    private fun withExt(u: String, ext: String): String {
-        val q = u.indexOf('?')
-        val path = if (q >= 0) u.substring(0, q) else u
-        val rest = if (q >= 0) u.substring(q) else ""
-        return if (extRe.containsMatchIn(path)) path.replace(extRe, ".$ext") + rest else u
-    }
-
-    /**
-     * 주소의 run 위치 숫자를 앞뒤로 바꿔 가며 실제로 있는 이미지를 찾는다.
-     * 6개씩 동시에 확인해서 빠르게, 빈 번호가 maxMiss개 이어지면 멈춤.
-     */
-    private fun sequence(url: String, run: Run, maxMiss: Int, tryExts: Boolean, strip: Boolean): List<String> {
-        val numStr = url.substring(run.start, run.end)
-        val width = numStr.length
-        val padded = numStr.startsWith("0") && width > 1
-        val start = numStr.toLong()
-        val q = url.indexOf('?')
-        val cutQuery = strip && q >= 0 && run.start < q
-        fun make(n: Long): String {
-            val ns = if (padded) n.toString().padStart(width, '0') else n.toString()
-            val u = url.substring(0, run.start) + ns + url.substring(run.end)
-            return if (cutQuery) u.substring(0, u.indexOf('?')) else u
-        }
-        var preferredExt: String? = null
-        fun probe(n: Long): String? {
-            val base = make(n)
-            if (exists(base)) return base
-            if (!tryExts) return null
-            val order = (listOfNotNull(preferredExt) + exts).distinct()
-            for (e in order) {
-                val c = withExt(base, e)
-                if (c != base && exists(c)) { preferredExt = e; return c }
+            GrabJob.DONE -> {
+                b?.visibility = View.GONE
+                actions?.visibility = View.VISIBLE
+                updateCount()
             }
-            return null
-        }
-
-        // 기준 이미지 자체 (원본 찾기를 켰는데 원본이 없으면 그대로 사용)
-        val self = probe(start) ?: url
-        val found = java.util.TreeMap<Long, String>()
-        found[start] = self
-        val checked = AtomicInteger(0)
-        fun scan(step: Int) {
-            var n = start + step
-            var miss = 0
-            while (!canceled && miss < maxMiss && n >= 0 && found.size < 5000) {
-                val batch = (0 until 6).map { n + it * step }.filter { it >= 0 }
-                if (batch.isEmpty()) break
-                val futures = batch.map { k -> pool.submit<String?> { if (canceled) null else probe(k) } }
-                for ((i, f) in futures.withIndex()) {
-                    val hit = try { f.get() } catch (e: Exception) { null }
-                    if (hit != null) { found[batch[i]] = hit; miss = 0 } else miss++
-                    if (miss >= maxMiss) break
-                }
-                n += 6L * step
-                val c = checked.addAndGet(batch.size)
-                main.post { setStatus("번호로 이어 찾는 중… ${found.size}개 찾음 (${c}번 확인)", indeterminate = true) }
+            GrabJob.NOTHING -> {
+                b?.visibility = View.GONE
+                showFail(j)
             }
+            else -> b?.visibility = View.GONE
         }
-        scan(-1)
-        scan(+1)
-        return found.values.toList()
-    }
-
-    private fun exists(url: String): Boolean {
-        return try {
-            var c = open(url, "HEAD")
-            var code = c.responseCode
-            if (code == 405 || code == 403 || code == 501) {
-                // HEAD를 안 받는 서버는 첫 1바이트만 요청
-                c.disconnect()
-                c = open(url)
-                c.setRequestProperty("Range", "bytes=0-0")
-                code = c.responseCode
-            }
-            val type = c.contentType ?: ""
-            val len = c.contentLengthLong
-            c.disconnect()
-            (code == 200 || code == 206) && !type.contains("html", true) && (len < 0 || len > 200)
-        } catch (e: Exception) {
-            false
+        if (shownPics != j.pics.size) {
+            shownPics = j.pics.size
+            adapter.notifyDataSetChanged()
         }
     }
 
-    // ================= 받기 =================
-
-    private fun downloadAll(urls: List<String>) {
-        val total = urls.size
-        val doneCount = AtomicInteger(0)
-        val failCount = AtomicInteger(0)
-        val digits = total.toString().length.coerceAtLeast(3)
-        setStatus("받는 중… 0 / $total", indeterminate = false, max = total)
-        val slots = arrayOfNulls<Pic>(total)
-        urls.forEachIndexed { i, url ->
-            pool.execute {
-                if (canceled) return@execute
-                val raw = try { URLDecoder.decode(Uri.parse(url).lastPathSegment ?: "img", "UTF-8") } catch (e: Exception) { "img" }
-                val clean = raw.replace(Regex("[\\\\/:*?\"<>|]"), "_")
-                val f = File(dir, (i + 1).toString().padStart(digits, '0') + "_" + clean)
-                var ok = false
-                try {
-                    val c = open(url)
-                    if (c.responseCode in 200..299 && !(c.contentType ?: "").contains("html", true)) {
-                        c.inputStream.use { ins -> FileOutputStream(f).use { ins.copyTo(it, 64 * 1024) } }
-                        ok = f.length() > 0
-                    }
-                    c.disconnect()
-                } catch (e: Exception) {
-                }
-                if (!ok) { f.delete(); failCount.incrementAndGet() }
-                val n = doneCount.incrementAndGet()
-                main.post {
-                    if (!isOpen) return@post
-                    if (ok) {
-                        slots[i] = Pic(url, f)
-                        // 원래 순서대로 보이도록 받은 것 중 순서대로 다시 채움
-                        pics.clear()
-                        slots.forEach { p -> if (p != null) pics.add(p) }
-                        adapter.notifyDataSetChanged()
-                    }
-                    val fails = failCount.get()
-                    setStatus("받는 중… $n / $total" + if (fails > 0) " (실패 $fails)" else "", indeterminate = false, max = total, value = n)
-                    if (bgMode) BgWork.update(a, "이미지 받는 중 $n / $total", collecting = false, progress = n, max = total)
-                    if (n == total) finishedDownloading(fails)
-                }
-            }
+    private fun showFail(j: GrabJob) {
+        val box = failBox ?: return
+        box.removeAllViews()
+        box.visibility = View.VISIBLE
+        val img = j.baseImage
+        if (img != null) {
+            box.addView(button("주소 분석해서 찾기", filled = true) {
+                val r = j.referer; val u = j.ua
+                JobStore.remove(j)
+                closeView()
+                analyze(img, r, u)
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, a.dp(46)).apply { bottomMargin = a.dp(8) })
         }
+        box.addView(button("페이지 넘기며 모으기", filled = img == null) {
+            JobStore.remove(j)
+            closeView()
+            a.startCollector()
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, a.dp(46)))
     }
 
-    private fun finishedDownloading(fails: Int) {
-        val size = pics.sumOf { it.file.length() }
-        if (bgMode) {
-            bgMode = false
-            BgWork.done(a, "$title · ${pics.size}장 받음. 눌러서 확인하고 압축하세요")
-        }
-        setStatus(
-            "${pics.size}개 받음 · ${Downloads.size(size)}" + (if (fails > 0) " · 실패 $fails" else "") +
-                "\n눌러서 빼거나 넣고, 꾸욱 눌러 크게 보기",
-            indeterminate = false
-        )
-        bar?.visibility = View.GONE
-        actions?.visibility = View.VISIBLE
-        updateCount()
-    }
-
-    // ================= 화면 =================
-
-    private fun buildUi() {
-        val box = LinearLayout(a).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(a.getColor(R.color.bar))
-            isClickable = true
-        }
+    private fun header(title: String, onBack: () -> Unit, right: View? = null): Pair<LinearLayout, TextView> {
         val head = LinearLayout(a).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(a.dp(4), a.dp(4), a.dp(8), a.dp(4))
         }
-        head.addView(a.iconBtn(R.drawable.ic_back, "닫기") { askClose() }, LinearLayout.LayoutParams(a.dp(48), a.dp(48)))
-        head.addView(TextView(a).apply {
+        head.addView(a.iconBtn(R.drawable.ic_back, "닫기") { onBack() }, LinearLayout.LayoutParams(a.dp(48), a.dp(48)))
+        val t = TextView(a).apply {
             text = title
             textSize = 17f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(a.getColor(R.color.text))
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.MIDDLE
-        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        head.addView(t, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        if (right != null) head.addView(right)
+        return Pair(head, t)
+    }
+
+    private fun buildUi(j: GrabJob) {
+        val box = LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(a.getColor(R.color.bar))
+            isClickable = true
+        }
+        val listBtn = TextView(a).apply {
+            text = "작업 목록"
+            textSize = 13f
+            setTextColor(a.getColor(R.color.accent))
+            setPadding(a.dp(10), a.dp(10), a.dp(10), a.dp(10))
+            a.ripple(this)
+            setOnClickListener { closeView(); openList() }
+        }
+        val (head, t) = header(j.title, { closeView() }, listBtn)
+        titleText = t
         box.addView(head)
 
         statusText = TextView(a).apply {
@@ -583,7 +363,6 @@ class Grabber(private val a: MainActivity) {
         }
         box.addView(failBox)
 
-        // 아래: 전체 선택 / ZIP / 낱개 저장
         val act = LinearLayout(a).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -591,6 +370,7 @@ class Grabber(private val a: MainActivity) {
             visibility = View.GONE
         }
         act.addView(button("전체", filled = false) {
+            val pics = job?.pics ?: return@button
             val all = pics.all { it.selected }
             pics.forEach { it.selected = !all }
             adapter.notifyDataSetChanged()
@@ -614,42 +394,220 @@ class Grabber(private val a: MainActivity) {
         setTextColor(if (filled) Color.WHITE else a.getColor(R.color.text))
         background = GradientDrawable().apply {
             cornerRadius = a.dp(23).toFloat()
-            if (filled) setColor(a.getColor(R.color.accent)) else {
-                setColor(a.getColor(R.color.field))
-            }
+            setColor(if (filled) a.getColor(R.color.accent) else a.getColor(R.color.field))
         }
         setOnClickListener { onClick() }
     }
 
-    private fun setStatus(text: String, indeterminate: Boolean, max: Int = 0, value: Int = 0) {
-        statusText?.text = text
-        bar?.let {
-            it.visibility = View.VISIBLE
-            it.isIndeterminate = indeterminate
-            if (!indeterminate) {
-                it.max = max.coerceAtLeast(1)
-                it.progress = value
-                if (max == 0) it.visibility = View.GONE
-            }
-        }
+    private fun updateCount() {
+        val j = job ?: return
+        if (j.state != GrabJob.DONE) return
+        val sel = j.pics.count { it.selected }
+        val size = j.pics.filter { it.selected }.sumOf { it.file.length() }
+        statusText?.text = "${j.pics.size}개 중 ${sel}개 선택 · ${Downloads.size(size)}" +
+            (if (j.fails > 0) " · 실패 ${j.fails}" else "") + "\n눌러서 빼거나 넣고, 꾸욱 눌러 크게 보기"
     }
 
-    private fun updateCount() {
-        val sel = pics.count { it.selected }
-        val size = pics.filter { it.selected }.sumOf { it.file.length() }
-        if (actions?.visibility == View.VISIBLE) {
-            statusText?.text = "${pics.size}개 중 ${sel}개 선택 · ${Downloads.size(size)}\n눌러서 빼거나 넣고, 꾸욱 눌러 크게 보기"
+    /** 보기 화면만 닫음 (작업은 계속) */
+    fun closeView() {
+        closePreview()
+        root?.let { a.frame.removeView(it) }
+        root = null
+        grid = null
+        failBox = null
+        actions = null
+        job = null
+    }
+
+    // ================= 작업 목록 =================
+
+    fun openList() {
+        closeView()
+        listRoot?.let { a.frame.removeView(it) }
+        val box = LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(a.getColor(R.color.bar))
+            isClickable = true
         }
+        val (head, _) = header("작업 현황", { closeList() })
+        box.addView(head)
+        val body = LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, a.dp(24))
+        }
+        box.addView(ScrollView(a).apply { addView(body) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        a.frame.addView(box, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        listRoot = box
+        listBody = body
+        renderList()
+    }
+
+    fun closeList() {
+        listRoot?.let { a.frame.removeView(it) }
+        listRoot = null
+        listBody = null
+    }
+
+    fun refreshList() {
+        if (listRoot != null) renderList()
+    }
+
+    private fun section(body: LinearLayout, t: String) {
+        body.addView(TextView(a).apply {
+            text = t
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(a.getColor(R.color.accent))
+            setPadding(a.dp(20), a.dp(18), a.dp(20), a.dp(6))
+        })
+    }
+
+    private fun jobRow(title: String, sub: String, prog: Int, max: Int, indeterminate: Boolean, onClick: () -> Unit,
+                       onLong: (() -> Unit)?, extra: List<Pair<String, () -> Unit>> = emptyList()): View {
+        val r = LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(a.dp(20), a.dp(12), a.dp(16), a.dp(12))
+            a.ripple(this)
+            setOnClickListener { onClick() }
+            if (onLong != null) setOnLongClickListener { onLong(); true }
+        }
+        r.addView(TextView(a).apply {
+            text = title
+            textSize = 15f
+            setTextColor(a.getColor(R.color.text))
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        })
+        r.addView(TextView(a).apply {
+            text = sub
+            textSize = 12f
+            setTextColor(a.getColor(R.color.sub))
+            maxLines = 2
+            setPadding(0, a.dp(2), 0, 0)
+        })
+        if (max > 0 || indeterminate) {
+            r.addView(ProgressBar(a, null, android.R.attr.progressBarStyleHorizontal).apply {
+                isIndeterminate = indeterminate
+                this.max = max.coerceAtLeast(1)
+                progress = prog
+                progressTintList = android.content.res.ColorStateList.valueOf(a.getColor(R.color.accent))
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, a.dp(6)).apply { topMargin = a.dp(6) })
+        }
+        if (extra.isNotEmpty()) {
+            val row = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.END }
+            extra.forEach { (t, act) ->
+                row.addView(TextView(a).apply {
+                    text = t
+                    textSize = 13f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(a.getColor(R.color.accent))
+                    setPadding(a.dp(12), a.dp(8), a.dp(12), a.dp(4))
+                    a.ripple(this)
+                    setOnClickListener { act() }
+                })
+            }
+            r.addView(row)
+        }
+        return r
+    }
+
+    private fun renderList() {
+        val body = listBody ?: return
+        body.removeAllViews()
+        var any = false
+
+        val collects = a.collectJobsInfo()
+        if (collects.isNotEmpty()) {
+            any = true
+            section(body, "넘기며 모으는 중")
+            collects.forEach { c ->
+                body.addView(jobRow(c.title, c.status, 0, 0, true, { closeList(); c.goTo() }, null, listOf(
+                    "탭으로 가기" to { closeList(); c.goTo() },
+                    "멈추고 받기" to { c.finish() },
+                    "취소" to { c.cancel() },
+                )))
+            }
+        }
+
+        val jobs = JobStore.jobs.toList()
+        val activeJobs = jobs.filter { it.active || it.state == GrabJob.FOUND }
+        val doneJobs = jobs.filter { !it.active && it.state != GrabJob.FOUND }
+        if (activeJobs.isNotEmpty()) {
+            any = true
+            section(body, "이미지 받는 중")
+            activeJobs.forEach { j ->
+                body.addView(jobRow(j.title, j.status.replace("\n", " "), j.done, j.total, j.state != GrabJob.DOWNLOADING,
+                    { openJob(j) }, { askRemove(j) }, listOf("취소" to { JobStore.cancel(j); JobStore.remove(j) })))
+            }
+        }
+        val files = Downloads.items.filter { it.state == Downloads.RUNNING }
+        if (files.isNotEmpty()) {
+            any = true
+            section(body, "파일 다운로드 중")
+            files.forEach { f ->
+                val pct = if (f.total > 0) (f.done * 100 / f.total).toInt() else -1
+                body.addView(jobRow(f.name,
+                    (if (pct >= 0) "$pct% · " else "") + Downloads.size(f.done) + (if (f.total > 0) " / " + Downloads.size(f.total) else "") +
+                        if (f.speed > 0) " · ${Downloads.size(f.speed)}/s" else "",
+                    pct.coerceAtLeast(0), if (pct >= 0) 100 else 0, pct < 0,
+                    { closeList(); a.openDownloadsPage() }, null))
+            }
+        }
+        if (doneJobs.isNotEmpty()) {
+            any = true
+            section(body, "완료된 이미지 받기 (눌러서 확인·압축, 꾸욱 눌러 지우기)")
+            doneJobs.forEach { j ->
+                val label = (if (!j.seen && j.state == GrabJob.DONE) "● " else "") + j.title
+                body.addView(jobRow(label, j.status.replace("\n", " "), 0, 0, false, { openJob(j) }, { askRemove(j) }))
+            }
+        }
+        if (!any) {
+            body.addView(TextView(a).apply {
+                text = "진행 중이거나 끝난 작업이 없어요"
+                textSize = 15f
+                gravity = Gravity.CENTER
+                setTextColor(a.getColor(R.color.sub))
+                setPadding(0, a.dp(60), 0, 0)
+            })
+        }
+        body.addView(TextView(a).apply {
+            text = "파일 다운로드 기록 전체 보기"
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTextColor(a.getColor(R.color.accent))
+            setPadding(0, a.dp(24), 0, a.dp(12))
+            a.ripple(this)
+            setOnClickListener { closeList(); a.openDownloadsPage() }
+        })
+    }
+
+    private fun askRemove(j: GrabJob) {
+        AlertDialog.Builder(a)
+            .setTitle(j.title)
+            .setMessage(if (j.active) "받는 중이에요. 취소하고 지울까요?" else "이 작업과 임시로 받은 이미지를 지울까요?\n(저장한 ZIP·이미지는 그대로예요)")
+            .setPositiveButton("지우기") { _, _ -> JobStore.remove(j) }
+            .setNegativeButton("취소", null)
+            .show()
+    }
+
+    // ================= 뒤로가기 =================
+
+    fun back(): Boolean {
+        if (preview != null) { closePreview(); return true }
+        if (root != null) { closeView(); return true }
+        if (listRoot != null) { closeList(); return true }
+        return false
     }
 
     // ================= 저장 =================
 
-    private fun chosen() = pics.filter { it.selected && it.file.exists() }
+    private fun chosen() = job?.pics?.filter { it.selected && it.file.exists() } ?: emptyList()
 
     private fun saveZip() {
+        val j = job ?: return
         val list = chosen()
         if (list.isEmpty()) { a.toastMsg("고른 이미지가 없어요"); return }
-        val name = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").ifBlank { "images" } + ".zip"
+        val name = j.title.replace(Regex("[\\\\/:*?\"<>|]"), "_").ifBlank { "images" } + ".zip"
         val total = list.sumOf { it.file.length() }
         Downloads.saveWith(a, name, "application/zip", total, { out, progress ->
             var n = 0L
@@ -671,12 +629,13 @@ class Grabber(private val a: MainActivity) {
                 }
             }
         }) { item ->
-            if (item.state == Downloads.DONE) askCleanup("$name 저장했어요 (${list.size}개)")
+            if (item.state == Downloads.DONE) askCleanup(j, "$name 저장했어요 (${list.size}개)")
         }
-        a.toastMsg("압축 중… 다운로드 화면에서 진행 상황을 볼 수 있어요")
+        a.toastMsg("압축 중… 끝나면 알림이 떠요")
     }
 
     private fun saveEach() {
+        val j = job ?: return
         val list = chosen()
         if (list.isEmpty()) { a.toastMsg("고른 이미지가 없어요"); return }
         val left = AtomicInteger(list.size)
@@ -688,53 +647,27 @@ class Grabber(private val a: MainActivity) {
             Downloads.saveWith(a, p.file.name.substringAfter('_'), mime, p.file.length(), { out, progress ->
                 FileInputStream(p.file).use { it.copyTo(out, 64 * 1024) }
                 progress(p.file.length())
-            }) { if (left.decrementAndGet() == 0) askCleanup("${list.size}개 저장했어요") }
+            }) { if (left.decrementAndGet() == 0) askCleanup(j, "${list.size}개 저장했어요") }
         }
     }
 
-    private fun askCleanup(msg: String) {
-        if (!isOpen) return
+    private fun askCleanup(j: GrabJob, msg: String) {
+        if (!a.isShown) return
         AlertDialog.Builder(a)
-            .setMessage("$msg\n\n이 화면을 닫을까요? (임시로 받은 이미지는 지워져요)")
-            .setPositiveButton("닫기") { _, _ -> close() }
-            .setNegativeButton("계속 보기", null)
+            .setMessage("$msg\n\n이 작업을 지울까요? (임시로 받은 이미지가 지워져요)")
+            .setPositiveButton("지우기") { _, _ ->
+                if (job === j) closeView()
+                JobStore.remove(j)
+            }
+            .setNegativeButton("남겨 두기", null)
             .show()
-    }
-
-    private fun askClose() {
-        if (pics.isEmpty()) { close(); return }
-        AlertDialog.Builder(a)
-            .setMessage("닫으면 임시로 받은 이미지가 지워져요. 닫을까요?")
-            .setPositiveButton("닫기") { _, _ -> close() }
-            .setNegativeButton("취소", null)
-            .show()
-    }
-
-    /** 뒤로가기: 크게 보기 → 화면 닫기 순서 */
-    fun back(): Boolean {
-        if (preview != null) { closePreview(); return true }
-        if (isOpen) { askClose(); return true }
-        return false
-    }
-
-    fun close() {
-        if (bgMode) { bgMode = false; BgWork.stop(a) }
-        canceled = true
-        closePreview()
-        root?.let { a.frame.removeView(it) }
-        root = null
-        grid = null
-        failBox = null
-        pics.clear()
-        cache.evictAll()
-        val d = dir
-        dir = null
-        if (d != null) Thread { d.deleteRecursively() }.start()
     }
 
     // ================= 크게 보기 =================
 
+    @SuppressLint("ClickableViewAccessibility")
     private fun openPreview(index: Int) {
+        val pics = job?.pics ?: return
         closePreview()
         var i = index
         val img = ImageView(a).apply {
@@ -761,9 +694,8 @@ class Grabber(private val a: MainActivity) {
             addView(img, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
             addView(label, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
         }
-        // 화면 왼쪽 1/3 이전, 오른쪽 1/3 다음, 가운데 닫기
         box.setOnTouchListener { v, e ->
-            if (e.action == android.view.MotionEvent.ACTION_UP) {
+            if (e.action == MotionEvent.ACTION_UP) {
                 val x = e.x / v.width
                 when {
                     x < 0.33f && i > 0 -> { i--; show() }
@@ -796,6 +728,8 @@ class Grabber(private val a: MainActivity) {
     }
 
     inner class Adapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+        private val pics get() = job?.pics ?: emptyList<GrabJob.Pic>()
+
         override fun getItemCount() = pics.size
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
@@ -828,9 +762,10 @@ class Grabber(private val a: MainActivity) {
         }
 
         override fun onBindViewHolder(h: RecyclerView.ViewHolder, position: Int) {
-            val p = pics[position]
+            val p = pics.getOrNull(position) ?: return
             val cell = h.itemView as FrameLayout
-            val w = (grid?.width ?: a.resources.displayMetrics.widthPixels) / ((grid?.layoutManager as? GridLayoutManager)?.spanCount ?: 3)
+            val w = (grid?.width?.takeIf { it > 0 } ?: a.resources.displayMetrics.widthPixels) /
+                ((grid?.layoutManager as? GridLayoutManager)?.spanCount ?: 3)
             cell.layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (w * 1.3f).toInt()).apply {
                 setMargins(a.dp(3), a.dp(3), a.dp(3), a.dp(3))
             }
@@ -859,6 +794,7 @@ class Grabber(private val a: MainActivity) {
                 }
             }
             cell.setOnClickListener {
+                if (job?.state != GrabJob.DONE) return@setOnClickListener
                 p.selected = !p.selected
                 notifyItemChanged(h.bindingAdapterPosition)
                 updateCount()

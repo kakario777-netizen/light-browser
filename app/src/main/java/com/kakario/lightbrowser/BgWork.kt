@@ -15,19 +15,22 @@ import android.os.IBinder
 import android.os.PowerManager
 
 /**
- * 화면이 꺼지거나 홈으로 나가도 작업(넘기며 모으기·이미지 받기)이 멈추지 않도록
- * 알림창에 진행 상황을 띄우고 CPU·와이파이를 깨워 두는 서비스.
+ * 화면이 꺼지거나 홈·다른 앱으로 가도 작업(넘기며 모으기·이미지 받기·파일 다운로드)이 멈추지 않도록
+ * 알림창에 진행 요약을 띄우고 CPU·와이파이를 깨워 두는 서비스.
+ * 작업이 끝나면 작업마다 '완료' 알림을 따로 띄운다.
  */
 object BgWork {
     private const val CH = "work"
     private const val CH_DONE = "done"
-    private const val ID = 41
-    private const val DONE_ID = 42
-    const val ACT_STOP = "stop_collect"
-    const val ACT_CANCEL = "cancel"
+    const val ID = 41
+    const val EXTRA_JOBS = "open_jobs"
+    const val EXTRA_JOB = "job_id"
+    const val EXTRA_DOWNLOADS = "open_downloads"
 
-    var onStop: (() -> Unit)? = null
-    var onCancel: (() -> Unit)? = null
+    /** 넘기며 모으는 작업 수와 모은 장수 (Collector가 알려줌) */
+    var collectJobs = 0
+    var collectImages = 0
+
     @Volatile var running = false
         private set
 
@@ -39,90 +42,122 @@ object BgWork {
             m.createNotificationChannel(NotificationChannel(CH, "진행 중인 작업", NotificationManager.IMPORTANCE_LOW))
         }
         if (m.getNotificationChannel(CH_DONE) == null) {
-            m.createNotificationChannel(NotificationChannel(CH_DONE, "작업 완료", NotificationManager.IMPORTANCE_DEFAULT))
+            m.createNotificationChannel(NotificationChannel(CH_DONE, "작업 완료", NotificationManager.IMPORTANCE_HIGH))
         }
     }
 
-    private fun openApp(ctx: Context) = PendingIntent.getActivity(
-        ctx, 0, Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+    private fun openApp(ctx: Context, code: Int, extra: (Intent) -> Unit) = PendingIntent.getActivity(
+        ctx, code,
+        Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP).also(extra),
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
     )
 
-    private fun action(ctx: Context, act: String, code: Int) = PendingIntent.getService(
-        ctx, code, Intent(ctx, BgService::class.java).setAction(act),
-        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-    )
+    /** 진행 중인 작업 요약 */
+    private fun summary(ctx: Context): Triple<String, Int, Int> {
+        val parts = mutableListOf<String>()
+        var prog = 0
+        var max = 0
+        if (collectJobs > 0) parts.add("넘기며 모으는 중 ${collectJobs}개 (${collectImages}장)")
+        val finding = JobStore.jobs.count { it.state == GrabJob.FINDING }
+        if (finding > 0) parts.add("이미지 찾는 중 ${finding}개")
+        val dl = JobStore.jobs.filter { it.state == GrabJob.DOWNLOADING }
+        if (dl.isNotEmpty()) {
+            prog = dl.sumOf { it.done }
+            max = dl.sumOf { it.total }
+            parts.add("이미지 받는 중 ${dl.size}개 ($prog/$max)")
+        }
+        val files = Downloads.items.filter { it.state == Downloads.RUNNING }
+        if (files.isNotEmpty()) {
+            parts.add("파일 다운로드 ${files.size}개")
+            if (max == 0) {
+                val t = files.sumOf { it.total.coerceAtLeast(0) }
+                if (t > 0) { max = 1000; prog = (files.sumOf { it.done } * 1000 / t).toInt() }
+            }
+        }
+        return Triple(parts.joinToString(" · "), prog, max)
+    }
 
-    fun build(ctx: Context, text: String, collecting: Boolean, progress: Int = -1, max: Int = 0): Notification {
+    fun build(ctx: Context): Notification {
         channels(ctx)
+        val (text, prog, max) = summary(ctx)
         val b = Notification.Builder(ctx, CH)
             .setSmallIcon(R.drawable.ic_download)
-            .setContentTitle("라이트 브라우저")
-            .setContentText(text)
+            .setContentTitle("작업 진행 중")
+            .setContentText(text.ifEmpty { "작업 중" })
+            .setStyle(Notification.BigTextStyle().bigText(text.replace(" · ", "\n")))
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setContentIntent(openApp(ctx))
-        if (max > 0) b.setProgress(max, progress, false) else b.setProgress(0, 0, true)
-        if (collecting) {
-            b.addAction(Notification.Action.Builder(null, "멈추고 받기", action(ctx, ACT_STOP, 1)).build())
-        }
-        b.addAction(Notification.Action.Builder(null, "취소", action(ctx, ACT_CANCEL, 2)).build())
+            .setContentIntent(openApp(ctx, 1) { it.putExtra(EXTRA_JOBS, true) })
+        if (max > 0) b.setProgress(max, prog, false) else b.setProgress(0, 0, true)
         return b.build()
     }
 
-    fun start(ctx: Context, text: String, collecting: Boolean) {
-        nm(ctx).cancel(DONE_ID)
-        running = true
-        lastCollecting = collecting
-        val i = Intent(ctx, BgService::class.java).putExtra("text", text).putExtra("collecting", collecting)
-        try {
-            ctx.startForegroundService(i)
-        } catch (e: Exception) {
+    private fun anyActive() = collectJobs > 0 || JobStore.jobs.any { it.active } ||
+        Downloads.items.any { it.state == Downloads.RUNNING }
+
+    /** 작업 상태가 바뀔 때마다 부름: 진행 중인 게 있으면 서비스 유지·알림 갱신, 없으면 정리 */
+    @SuppressLint("MissingPermission")
+    fun sync(ctx: Context) {
+        if (anyActive()) {
+            if (!running) {
+                running = true
+                try {
+                    ctx.startForegroundService(Intent(ctx, BgService::class.java))
+                } catch (e: Exception) {
+                    running = false
+                }
+            } else {
+                try { nm(ctx).notify(ID, build(ctx)) } catch (e: Exception) {}
+            }
+        } else if (running) {
             running = false
+            ctx.stopService(Intent(ctx, BgService::class.java))
+            nm(ctx).cancel(ID)
         }
     }
 
-    private var lastCollecting = false
-
     @SuppressLint("MissingPermission")
-    fun update(ctx: Context, text: String, collecting: Boolean = lastCollecting, progress: Int = -1, max: Int = 0) {
-        if (!running) return
-        lastCollecting = collecting
-        try {
-            nm(ctx).notify(ID, build(ctx, text, collecting, progress, max))
-        } catch (e: Exception) {
-        }
-    }
-
-    fun stop(ctx: Context) {
-        if (!running) return
-        running = false
-        onStop = null
-        onCancel = null
-        ctx.stopService(Intent(ctx, BgService::class.java))
-        nm(ctx).cancel(ID)
-    }
-
-    /** 작업이 끝났다는 알림 (눌러서 앱으로) */
-    @SuppressLint("MissingPermission")
-    fun done(ctx: Context, text: String) {
-        stop(ctx)
+    private fun doneNote(ctx: Context, id: Int, title: String, text: String, intent: PendingIntent) {
         channels(ctx)
         try {
             nm(ctx).notify(
-                DONE_ID, Notification.Builder(ctx, CH_DONE)
+                id, Notification.Builder(ctx, CH_DONE)
                     .setSmallIcon(R.drawable.ic_download)
-                    .setContentTitle("라이트 브라우저")
+                    .setContentTitle(title)
                     .setContentText(text)
                     .setAutoCancel(true)
-                    .setContentIntent(openApp(ctx))
+                    .setContentIntent(intent)
                     .build()
             )
         } catch (e: Exception) {
         }
     }
 
-    fun clearDone(ctx: Context) = nm(ctx).cancel(DONE_ID)
+    private fun noteId(jobId: Long) = 1000 + (jobId % 100000).toInt()
+
+    /** 이미지 받기 작업 완료 알림 (눌러서 그 작업 열기) */
+    fun jobDone(ctx: Context, j: GrabJob) {
+        val code = noteId(j.id)
+        doneNote(
+            ctx, code,
+            if (j.pics.isEmpty()) "이미지 받기 실패" else "이미지 받기 완료",
+            "${j.title} · ${j.pics.size}장" + (if (j.fails > 0) " (실패 ${j.fails})" else "") + " · 눌러서 확인하고 압축하세요",
+            openApp(ctx, code) { it.putExtra(EXTRA_JOB, j.id) }
+        )
+    }
+
+    fun clearJob(ctx: Context, jobId: Long) = nm(ctx).cancel(noteId(jobId))
+
+    /** 파일 다운로드 완료 알림 */
+    fun fileDone(ctx: Context, it: Downloads.Item) {
+        val code = 200000 + (it.id % 100000).toInt()
+        doneNote(
+            ctx, code,
+            if (it.state == Downloads.DONE) "다운로드 완료" else "다운로드 실패",
+            it.name,
+            openApp(ctx, code) { i -> i.putExtra(EXTRA_DOWNLOADS, true) }
+        )
+    }
 }
 
 class BgService : Service() {
@@ -132,25 +167,12 @@ class BgService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            BgWork.ACT_STOP -> {
-                BgWork.onStop?.invoke() ?: stopIfIdle()
-                return START_NOT_STICKY
-            }
-            BgWork.ACT_CANCEL -> {
-                BgWork.onCancel?.invoke() ?: stopIfIdle()
-                return START_NOT_STICKY
-            }
-        }
-        val n = BgWork.build(this, intent?.getStringExtra("text") ?: "작업 중", intent?.getBooleanExtra("collecting", false) == true)
-        if (Build.VERSION.SDK_INT >= 29) startForeground(41, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        else startForeground(41, n)
+        val n = BgWork.build(this)
+        if (Build.VERSION.SDK_INT >= 29) startForeground(BgWork.ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        else startForeground(BgWork.ID, n)
         acquire()
-        return START_NOT_STICKY
-    }
-
-    private fun stopIfIdle() {
         if (!BgWork.running) stopSelf()
+        return START_NOT_STICKY
     }
 
     @Suppress("DEPRECATION")

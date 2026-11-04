@@ -90,6 +90,9 @@ class MainActivity : Activity() {
     private lateinit var address: EditText
     private lateinit var starBtn: ImageButton
     private lateinit var reloadBtn: ImageButton
+    private lateinit var jobsBtn: FrameLayout
+    private lateinit var jobsIcon: ImageView
+    private lateinit var jobsBadge: TextView
     private lateinit var progress: ProgressBar
     private lateinit var content: FrameLayout
     private lateinit var homeView: ScrollView
@@ -132,8 +135,11 @@ class MainActivity : Activity() {
         setupWindow()
         switcher = TabSwitcher(this)
         pages = Pages(this)
-        grabber = Grabber(this)
         collector = Collector(this)
+        grabber = Grabber(this)
+        JobStore.listeners.add(jobsListener)
+        Downloads.onActivity = { onJobsChanged() }
+        JobStore.onFinished = { j -> onGrabFinished(j) }
 
         val (urls, idx) = store.loadSession()
         if (urls.isEmpty()) {
@@ -152,7 +158,30 @@ class MainActivity : Activity() {
     }
 
     private fun handleIntent(i: Intent?) {
-        if (i?.action == Intent.ACTION_VIEW) {
+        if (i == null) return
+        // 알림을 눌러 들어온 경우
+        when {
+            i.getLongExtra(BgWork.EXTRA_JOB, -1L) >= 0 -> {
+                val id = i.getLongExtra(BgWork.EXTRA_JOB, -1L)
+                i.removeExtra(BgWork.EXTRA_JOB)
+                closeOverlays()
+                grabber.openJobById(id)
+                return
+            }
+            i.getBooleanExtra(BgWork.EXTRA_JOBS, false) -> {
+                i.removeExtra(BgWork.EXTRA_JOBS)
+                closeOverlays()
+                grabber.openList()
+                return
+            }
+            i.getBooleanExtra(BgWork.EXTRA_DOWNLOADS, false) -> {
+                i.removeExtra(BgWork.EXTRA_DOWNLOADS)
+                closeOverlays()
+                pages.openDownloads()
+                return
+            }
+        }
+        if (i.action == Intent.ACTION_VIEW) {
             i.data?.toString()?.let {
                 closeOverlays()
                 newTab(it)
@@ -176,7 +205,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         isShown = true
-        BgWork.clearDone(this)
+        onJobsChanged()
         tabs.getOrNull(cur)?.let { if (!it.home) it.webView.onResume() }
     }
 
@@ -184,6 +213,10 @@ class MainActivity : Activity() {
         tabs.forEach { it.webView.destroy() }
         closedTab?.first?.webView?.destroy()
         if (Downloads.onFinish != null) Downloads.onFinish = null
+        Downloads.onActivity = null
+        JobStore.listeners.remove(jobsListener)
+        JobStore.onFinished = null
+        grabber.release()
         super.onDestroy()
     }
 
@@ -290,6 +323,34 @@ class MainActivity : Activity() {
             if (loading) t.webView.stopLoading() else t.webView.reload()
         }
         top.addView(field, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        // 작업 현황 아이콘 (넘기며 모으기·이미지 받기·파일 다운로드) + 진행 중 개수
+        jobsIcon = ImageView(this).apply {
+            setImageResource(R.drawable.ic_download)
+            imageTintList = ColorStateList.valueOf(col(R.color.text))
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+        }
+        jobsBadge = TextView(this).apply {
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(col(R.color.accent))
+            }
+            visibility = View.GONE
+        }
+        jobsBtn = FrameLayout(this).apply {
+            ripple(this, borderless = true)
+            contentDescription = "작업 현황"
+            visibility = View.GONE
+            setOnClickListener { leaveAddress(); closeOverlays(); grabber.openList() }
+            addView(jobsIcon, FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER))
+            addView(jobsBadge, FrameLayout.LayoutParams(dp(17), dp(17), Gravity.TOP or Gravity.END).apply {
+                topMargin = dp(4); rightMargin = dp(2)
+            })
+        }
+        top.addView(jobsBtn, LinearLayout.LayoutParams(dp(40), dp(44)))
         top.addView(reloadBtn, LinearLayout.LayoutParams(dp(44), dp(44)))
 
         progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
@@ -447,6 +508,7 @@ class MainActivity : Activity() {
             starBtn.imageTintList = ColorStateList.valueOf(col(if (on) R.color.accent else R.color.sub))
         }
         tabsBtn.text = if (tabs.size > 99) ":D" else tabs.size.toString()
+        onJobsChanged()
         if (t.home || !loading) progress.visibility = View.INVISIBLE
     }
 
@@ -521,7 +583,7 @@ class MainActivity : Activity() {
         tabs.add(t)
         if (select) {
             captureCurrentTab()
-            tabs.getOrNull(cur)?.webView?.onPause()
+            tabs.getOrNull(cur)?.webView?.let { pauseTab(it) }
             cur = tabs.size - 1
             showTab()
         } else {
@@ -553,7 +615,7 @@ class MainActivity : Activity() {
         if (i !in tabs.indices) return
         if (i != cur) {
             captureCurrentTab()
-            tabs.getOrNull(cur)?.webView?.onPause()
+            tabs.getOrNull(cur)?.webView?.let { pauseTab(it) }
             cur = i
         }
         showTab()
@@ -590,6 +652,7 @@ class MainActivity : Activity() {
         }
         loading = t.webView.progress in 1..99 && !t.home
         updateUi()
+        if (::collector.isInitialized) collector.refreshBar()
     }
 
     /** 탭을 목록에서 빼기만 한다 (웹뷰는 그대로) */
@@ -597,6 +660,7 @@ class MainActivity : Activity() {
         val wasCurrent = i == cur
         val t = tabs.removeAt(i)
         (t.webView.parent as? ViewGroup)?.removeView(t.webView)
+        collector.tabClosing(t.webView)
         t.webView.onPause()
         tabs.forEach { if (it.opener === t) it.opener = t.opener }
         if (tabs.isEmpty()) {
@@ -667,6 +731,10 @@ class MainActivity : Activity() {
     private fun closeOverlays() {
         if (switcher.isOpen) switcher.close()
         pages.closeAll()
+        if (::grabber.isInitialized) {
+            grabber.closeView()
+            grabber.closeList()
+        }
     }
 
     // ================= 이동 =================
@@ -1096,7 +1164,7 @@ class MainActivity : Activity() {
             t.openedByLink = true
             t.opener = findTab(view)
             captureCurrentTab()
-            tabs.getOrNull(cur)?.webView?.onPause()
+            tabs.getOrNull(cur)?.webView?.let { pauseTab(it) }
             val at = (t.opener?.let { tabs.indexOf(it) } ?: cur) + 1
             tabs.add(at.coerceIn(0, tabs.size), t)
             cur = tabs.indexOf(t)
@@ -1515,6 +1583,13 @@ class MainActivity : Activity() {
         pm.show()
     }
 
+    /** 탭을 바꿀 때 이전 탭을 멈춤 (넘기며 모으는 탭은 계속 돌아가게 둠) */
+    private fun pauseTab(w: WebView) {
+        if (!collector.holds(w)) w.onPause()
+    }
+
+    fun hasWebView(w: WebView) = tabs.any { it.webView === w }
+
     fun currentWebView(): WebView? = tabs.getOrNull(cur)?.takeIf { !it.home }?.webView
 
     fun startCollector() {
@@ -1522,8 +1597,53 @@ class MainActivity : Activity() {
         collector.begin()
     }
 
-    fun openGrabberWith(urls: List<String>, page: String?, ua: String?, name: String, autoStart: Boolean = false) {
-        grabber.startWithUrls(urls, page, ua, name, autoStart)
+    fun openGrabberWith(urls: List<String>, page: String?, ua: String?, name: String, show: Boolean) {
+        if (show) closeOverlays()
+        grabber.startWithUrls(urls, page, ua, name, show)
+    }
+
+    fun collectJobsInfo() = collector.info()
+
+    fun openDownloadsPage() = pages.openDownloads()
+
+    fun snackMsg(text: String) = showSnack(text, "작업 보기", 4_000) { closeOverlays(); grabber.openList() }
+
+    fun selectTabOf(w: WebView) {
+        val i = tabs.indexOfFirst { it.webView === w }
+        if (i >= 0) {
+            closeOverlays()
+            selectTab(i)
+        }
+    }
+
+    private val jobsListener: (GrabJob?) -> Unit = { onJobsChanged() }
+
+    /** 작업 현황 아이콘: 진행 중이면 개수, 끝났는데 안 본 작업이 있으면 점 */
+    fun onJobsChanged() {
+        if (!::jobsBtn.isInitialized || !::collector.isInitialized || !::grabber.isInitialized) return
+        val active = BgWork.collectJobs + JobStore.activeCount() +
+            Downloads.items.count { it.state == Downloads.RUNNING }
+        val unseen = JobStore.jobs.count { it.state == GrabJob.DONE && !it.seen }
+        val show = active > 0 || JobStore.jobs.isNotEmpty() || collector.info().isNotEmpty()
+        jobsBtn.visibility = if (show && !address.hasFocus()) View.VISIBLE else View.GONE
+        jobsIcon.imageTintList = ColorStateList.valueOf(col(if (active > 0) R.color.accent else R.color.text))
+        when {
+            active > 0 -> { jobsBadge.visibility = View.VISIBLE; jobsBadge.text = if (active > 9) "9+" else active.toString() }
+            unseen > 0 -> { jobsBadge.visibility = View.VISIBLE; jobsBadge.text = "" }
+            else -> jobsBadge.visibility = View.GONE
+        }
+        grabber.refreshList()
+    }
+
+    /** 이미지 받기 완료: 앱 안에 완료 표시 (알림창 알림은 BgWork가 따로 띄움) */
+    private fun onGrabFinished(j: GrabJob) {
+        onJobsChanged()
+        if (!isShown) return
+        val msg = if (j.pics.isEmpty()) "'${j.title}' 받기 실패" else "'${j.title}' ${j.pics.size}장 받기 완료"
+        showSnack(msg, "보기", 6_000) {
+            closeOverlays()
+            grabber.openJob(j)
+        }
     }
 
     /** 알림 표시 권한, 배터리 최적화 제외 (백그라운드 작업이 끊기지 않게) */

@@ -388,15 +388,15 @@ class HistoryPage(private val a: MainActivity) {
                 (h.itemView as TextView).text = r.header
                 return
             }
-            val it = r.item ?: return
+            val item = r.item ?: return
             val row = h.itemView as LinearLayout
             val check = row.findViewById<CheckBox>(1)
             check.visibility = if (selecting) View.VISIBLE else View.GONE
             check.isChecked = r.index in selected
-            row.findViewById<TextView>(2).text = it.title.ifBlank { it.url }
-            row.findViewById<TextView>(3).text = it.url.removePrefix("https://").removePrefix("http://")
+            row.findViewById<TextView>(2).text = item.title.ifBlank { item.url }
+            row.findViewById<TextView>(3).text = item.url.removePrefix("https://").removePrefix("http://")
             row.findViewById<TextView>(4).text =
-                if (it.time > 0) SimpleDateFormat("HH:mm", Locale.KOREA).format(Date(it.time)) else ""
+                if (item.time > 0) SimpleDateFormat("HH:mm", Locale.KOREA).format(Date(item.time)) else ""
             row.setBackgroundColor(if (r.index in selected) a.getColor(R.color.field) else 0)
             row.setOnClickListener {
                 if (selecting) {
@@ -404,7 +404,7 @@ class HistoryPage(private val a: MainActivity) {
                     notifyItemChanged(h.bindingAdapterPosition)
                 } else {
                     close()
-                    a.openUrl(it.url)
+                    a.openUrl(item.url)
                 }
             }
             row.setOnLongClickListener {

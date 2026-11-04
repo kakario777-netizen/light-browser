@@ -99,6 +99,7 @@ class MainActivity : Activity() {
     private lateinit var tabsBtn: TextView
     private lateinit var switcher: TabSwitcher
     private lateinit var pages: Pages
+    private lateinit var grabber: Grabber
 
     private var loading = false
     private var customView: View? = null
@@ -110,6 +111,7 @@ class MainActivity : Activity() {
     fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
     private fun col(id: Int) = getColor(id)
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+    fun toastMsg(s: String) = toast(s)
     private fun isNight() =
         (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
 
@@ -127,6 +129,7 @@ class MainActivity : Activity() {
         setupWindow()
         switcher = TabSwitcher(this)
         pages = Pages(this)
+        grabber = Grabber(this)
 
         val (urls, idx) = store.loadSession()
         if (urls.isEmpty()) {
@@ -719,6 +722,7 @@ class MainActivity : Activity() {
     override fun onBackPressed() {
         when {
             customView != null -> exitFullscreen()
+            grabber.back() -> {}
             pages.back() -> {}
             switcher.isOpen -> switcher.close()
             address.hasFocus() -> leaveAddress()
@@ -786,7 +790,10 @@ class MainActivity : Activity() {
         }
         if (img != null) {
             items.add("이미지 저장" to { saveImage(wv, img) })
-            if (img.startsWith("http")) items.add("이미지를 새 탭에서 보기" to { openInBackground(img, findTab(wv)) })
+            if (img.startsWith("http")) {
+                items.add("이 이미지 폴더 전체 받기" to { grabber.start(img, wv.url, wv.settings.userAgentString) })
+                items.add("이미지를 새 탭에서 보기" to { openInBackground(img, findTab(wv)) })
+            }
         }
         if (items.isEmpty()) return
         val title = (link ?: img ?: "").let { if (it.startsWith("data:")) "이미지" else displayUrl(it) }
@@ -1464,6 +1471,7 @@ class MainActivity : Activity() {
         m.add(0, 3, 0, "방문 기록")
         m.add(0, 5, 0, "페이지 공유")
         m.add(0, 6, 0, "데스크톱 모드").apply { isCheckable = true; isChecked = t.desktop }
+        m.add(0, 11, 0, "이미지 폴더 받기")
         m.add(0, 9, 0, "설정")
         pm.setOnMenuItemClickListener { item ->
             when (item.itemId) {
@@ -1476,10 +1484,30 @@ class MainActivity : Activity() {
                 }
                 6 -> setDesktop(t, !t.desktop)
                 9 -> pages.openSettings()
+                11 -> grabFromPage(t)
             }
             true
         }
         pm.show()
+    }
+
+    /** 지금 페이지에서 가장 크게 보이는 이미지를 기준으로 폴더 받기 */
+    private fun grabFromPage(t: Tab) {
+        val wv = t.webView
+        val url = wv.url
+        if (t.home || url == null) { toast("이미지가 있는 페이지에서 써 주세요"); return }
+        if (Regex("\\.(jpe?g|png|gif|webp|bmp|avif)(\\?|$)", RegexOption.IGNORE_CASE).containsMatchIn(url)) {
+            grabber.start(url, null, wv.settings.userAgentString)
+            return
+        }
+        val js = "(function(){var b=null,ba=0;document.querySelectorAll('img').forEach(function(i){" +
+            "var r=i.getBoundingClientRect();var a=r.width*r.height;var s=i.currentSrc||i.src;" +
+            "if(a>ba&&s&&s.indexOf('http')==0){ba=a;b=s;}});return b;})()"
+        wv.evaluateJavascript(js) { res ->
+            val img = try { org.json.JSONTokener(res).nextValue() as? String } catch (e: Exception) { null }
+            if (img.isNullOrBlank()) toast("이 페이지에서 이미지를 찾지 못했어요. 이미지를 꾸욱 눌러서 해 보세요")
+            else grabber.start(img, url, wv.settings.userAgentString)
+        }
     }
 
     fun showHistory() {

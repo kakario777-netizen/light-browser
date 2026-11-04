@@ -297,6 +297,44 @@ object Downloads {
         return item
     }
 
+    /** 앱이 직접 만든 파일(ZIP 등)을 다운로드 폴더에 저장하고 다운로드 목록에 올린다 */
+    fun saveWith(
+        ctx: Context, name: String, mime: String, total: Long,
+        write: (OutputStream, (Long) -> Unit) -> Unit, done: ((Item) -> Unit)? = null
+    ): Item {
+        val app = ctx.applicationContext
+        val item = newItem("app:", mime)
+        item.name = name
+        item.total = total
+        changed()
+        Thread {
+            var uri: Uri? = null
+            try {
+                val (o, ur) = openOut(app, name, mime)
+                uri = ur
+                item.uri = ur.toString()
+                var last = 0L
+                o.use { out ->
+                    write(out) { n ->
+                        item.done = n
+                        val now = System.currentTimeMillis()
+                        if (now - last > 300) { last = now; changed() }
+                    }
+                }
+                publish(app, ur)
+                item.total = item.done.coerceAtLeast(item.total)
+                item.state = DONE
+            } catch (e: Exception) {
+                if (uri != null) deleteFile(app, item)
+                item.error = e.message
+                item.state = FAILED
+            }
+            finished(app, item)
+            main.post { done?.invoke(item) }
+        }.start()
+        return item
+    }
+
     fun size(b: Long): String = when {
         b < 0 -> "?"
         b < 1024 -> "${b}B"

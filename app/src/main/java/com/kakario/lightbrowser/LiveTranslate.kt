@@ -50,6 +50,9 @@ class LiveTranslate(private val a: MainActivity) {
     private var gen = 0
     private var lastSig = ""
     private var heavyFailed = false
+    private var mangaFailed = false
+    private val ocrThread = Executors.newSingleThreadExecutor()
+    @Volatile private var manga: MangaOcr? = null
 
     // ================= 켜고 끄기 =================
 
@@ -68,7 +71,7 @@ class LiveTranslate(private val a: MainActivity) {
             .setMessage(
                 "처음 한 번, 일본어 글자 인식과 번역에 필요한 모델을 받아요 (${ModelStore.LIGHT_SIZE}).\n" +
                     "와이파이에서 받는 걸 권해요. 받은 뒤에는 인터넷 없이 번역돼요.\n\n" +
-                    "더 자연스러운 고급 모델(${ModelStore.HEAVY_SIZE})은 설정 › 자세한 설정에서 따로 받을 수 있어요."
+                    "더 정확한 만화 전용 글자 인식(${ModelStore.MANGA_OCR.sizeText})과 더 자연스러운 고급 번역 모델(${ModelStore.QWEN.sizeText})은 설정 › 자세한 설정에서 따로 받을 수 있어요."
             )
             .setPositiveButton("받기") { _, _ -> downloadFirst() }
             .setNegativeButton("취소", null)
@@ -125,8 +128,9 @@ class LiveTranslate(private val a: MainActivity) {
     private fun begin() {
         isOn = true
         heavyFailed = false
+        mangaFailed = false
         attachOverlay()
-        a.toastMsg("실시간 번역 켬 · " + if (useHeavy()) "고급 모델" else "일반 모델")
+        a.toastMsg("실시간 번역 켬 · 글자 인식 " + (if (useManga()) "만화 전용" else "일반") + " · 번역 " + if (useHeavy()) "고급 모델" else "일반 모델")
         lastSig = ""
         main.removeCallbacks(poll)
         main.postDelayed(poll, 400)
@@ -143,16 +147,23 @@ class LiveTranslate(private val a: MainActivity) {
         val l = llm
         llm = null
         if (l != null) llmThread.execute { try { l.close() } catch (e: Exception) {} }
+        val m = manga
+        manga = null
+        if (m != null) ocrThread.execute { m.close() }
         a.toastMsg("실시간 번역 끔")
     }
 
     /** 고급 모델을 쓸지 (설정에서 골랐고 받아 두었을 때) */
-    private fun useHeavy() = a.store.transModel == 1 && ModelStore.heavyReady(a) && !heavyFailed
+    private fun useHeavy() = a.store.transModel == 1 && ModelStore.QWEN.ready(a) && !heavyFailed
+
+    /** 만화 전용 글자 인식을 쓸지 (설정에서 골랐고 받아 두었을 때) */
+    private fun useManga() = a.store.ocrEngine == 1 && ModelStore.MANGA_OCR.ready(a) && !mangaFailed
 
     /** 설정에서 모델을 바꿨을 때 */
     fun modelChanged() {
         cache.clear()
         heavyFailed = false
+        mangaFailed = false
         if (isOn) {
             overlay?.clear()
             schedule(200)
@@ -260,19 +271,27 @@ class LiveTranslate(private val a: MainActivity) {
                 recognizerOrCreate().process(InputImage.fromBitmap(bmp, 0))
                     .addOnSuccessListener { text ->
                         if (!isOn || myGen != gen) { finishRun(); return@addOnSuccessListener }
-                        val boxes = pickBoxes(text)
-                        if (boxes.isEmpty()) {
+                        val found = pickBoxes(text, loose = useManga())
+                        if (found.isEmpty()) {
                             o?.setStatus(null)
                             o?.setBoxes(emptyList())
                             finishRun()
                             return@addOnSuccessListener
                         }
-                        translate(boxes, myGen) { results ->
-                            if (isOn && myGen == gen) {
-                                o?.setStatus(null)
-                                o?.setBoxes(boxes.mapIndexed { i, b -> Pair(b.rect, results[i]) })
+                        // 만화 전용 인식: ML Kit이 찾은 자리를 잘라 manga-ocr로 다시 읽음
+                        rereadWithManga(found, bmp, myGen) { boxes ->
+                            if (!isOn || myGen != gen || boxes.isEmpty()) {
+                                if (isOn && myGen == gen) { o?.setStatus(null); o?.setBoxes(emptyList()) }
+                                finishRun()
+                                return@rereadWithManga
                             }
-                            finishRun()
+                            translate(boxes, myGen) { results ->
+                                if (isOn && myGen == gen) {
+                                    o?.setStatus(null)
+                                    o?.setBoxes(boxes.mapIndexed { i, b -> Pair(b.rect, results[i]) })
+                                }
+                                finishRun()
+                            }
                         }
                     }
                     .addOnFailureListener { e ->
@@ -294,8 +313,46 @@ class LiveTranslate(private val a: MainActivity) {
 
     private val jp = Regex("[\\u3040-\\u30ff\\u4e00-\\u9fff]")
 
-    /** 인식 결과에서 번역할 덩어리 고르기 (세로쓰기는 오른쪽 줄부터 읽음) */
-    private fun pickBoxes(t: Text): List<Box> {
+    /**
+     * 만화 전용 인식을 쓰면 각 자리를 잘라 manga-ocr로 다시 읽는다 (백그라운드).
+     * 실패하면 ML Kit 결과를 그대로 씀.
+     */
+    private fun rereadWithManga(boxes: List<Box>, bmp: Bitmap, myGen: Int, done: (List<Box>) -> Unit) {
+        if (!useManga()) {
+            done(boxes.filter { jp.findAll(it.text).count() >= 2 })
+            return
+        }
+        overlay?.setStatus("만화 전용으로 글자 읽는 중…")
+        ocrThread.execute {
+            val out = ArrayList<Box>()
+            try {
+                val engine = manga ?: MangaOcr(a).also { manga = it }
+                val pad = (6 * a.resources.displayMetrics.density).toInt()
+                for (b in boxes) {
+                    if (!isOn || myGen != gen) break
+                    val r = Rect(b.rect)
+                    r.inset(-pad, -pad)
+                    if (!r.intersect(0, 0, bmp.width, bmp.height) || r.width() < 8 || r.height() < 8) continue
+                    val crop = Bitmap.createBitmap(bmp, r.left, r.top, r.width(), r.height())
+                    val txt = try { engine.recognize(crop) } finally { crop.recycle() }
+                    val use = if (jp.findAll(txt).count() >= 2) txt else b.text
+                    if (jp.findAll(use).count() >= 2) out.add(Box(b.rect, use))
+                }
+            } catch (e: Throwable) {
+                // 메모리 부족·모델 파일 이상 등 → 일반 인식으로
+                main.post {
+                    mangaFailed = true
+                    a.toastMsg("만화 전용 인식을 쓰지 못해 일반 인식으로 해요 (${e.message?.take(40) ?: ""})")
+                }
+                out.clear()
+                out.addAll(boxes.filter { jp.findAll(it.text).count() >= 2 })
+            }
+            main.post { done(out) }
+        }
+    }
+
+    /** 인식 결과에서 번역할 덩어리 고르기 (세로쓰기는 오른쪽 줄부터 읽음). loose면 글자가 적어도 자리만 맞으면 남김 */
+    private fun pickBoxes(t: Text, loose: Boolean): List<Box> {
         val out = ArrayList<Box>()
         for (b in t.textBlocks) {
             val r = b.boundingBox ?: continue
@@ -305,7 +362,8 @@ class LiveTranslate(private val a: MainActivity) {
             val ordered = if (vertical) lines.sortedByDescending { it.boundingBox!!.centerX() }
             else lines.sortedBy { it.boundingBox!!.centerY() }
             val s = ordered.joinToString("") { it.text.replace(" ", "") }.trim()
-            if (jp.findAll(s).count() < 2) continue   // 효과음 한 글자·숫자 등은 건너뜀
+            // 효과음 한 글자·숫자 등은 건너뜀 (만화 전용 인식은 다시 읽어 보므로 1글자도 남김)
+            if (jp.findAll(s).count() < (if (loose) 1 else 2)) continue
             out.add(Box(Rect(r), s))
         }
         return out
@@ -336,7 +394,7 @@ class LiveTranslate(private val a: MainActivity) {
 
     /** 고급 모델: 한 페이지의 대사를 번호 붙여 한 번에 번역 */
     private fun translateHeavy(todo: List<String>, myGen: Int, done: (Boolean) -> Unit) {
-        val path = ModelStore.heavyFile(a).absolutePath
+        val path = ModelStore.QWEN.file(a, "model.task").absolutePath
         llmThread.execute {
             var ok = false
             try {

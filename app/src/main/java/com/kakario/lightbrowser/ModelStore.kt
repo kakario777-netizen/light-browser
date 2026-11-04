@@ -17,32 +17,70 @@ import java.net.Proxy
 import java.net.URL
 
 /**
- * 만화 번역 모델 관리 (앱에 넣지 않고 쓸 때 받음).
- *  - 일반 모델: 구글 ML Kit 번역 (일본어·한국어 각 약 30MB, 빠름)
- *  - 고급 모델: Qwen2.5 1.5B (약 1.6GB, 더 자연스럽지만 느림). 이어받기 지원.
+ * 만화 번역에 쓰는 모델 관리 (앱에 넣지 않고 쓸 때 받음).
+ *  - 일반 번역: 구글 ML Kit (일본어·한국어 각 약 30MB)
+ *  - 고급 번역: Qwen2.5 1.5B (약 1.6GB)
+ *  - 만화 전용 글자 인식: manga-ocr (약 461MB)
+ * 큰 모델은 파일 묶음(Pack)으로 받고, 끊기면 이어받는다.
  */
 object ModelStore {
-    const val HEAVY_URL =
-        "https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv1280.task"
-    const val HEAVY_SIZE = "약 1.6GB"
     const val LIGHT_SIZE = "약 60MB"
 
     private val main = Handler(Looper.getMainLooper())
 
-    fun heavyFile(ctx: Context) = File(File(ctx.filesDir, "models").apply { mkdirs() }, "qwen2.5-1.5b-q8.task")
-    private fun heavyPart(ctx: Context) = File(heavyFile(ctx).path + ".part")
+    /** 받을 파일 묶음 하나 */
+    class Pack(
+        val id: String,
+        val title: String,
+        val sizeText: String,
+        val expected: Long,                       // 대략 전체 크기 (진행률 표시용)
+        val files: List<Pair<String, String>>,    // (주소, 저장 이름)
+    ) {
+        @Volatile var downloading = false
+            internal set
+        @Volatile var done = 0L
+            internal set
+        @Volatile var error: String? = null
+            internal set
+        @Volatile internal var cancel = false
+        /** 받기가 끝났을 때 (성공 여부, 메인 스레드) */
+        var onDone: ((Boolean) -> Unit)? = null
 
-    fun heavyReady(ctx: Context) = heavyFile(ctx).let { it.exists() && it.length() > 100L * 1024 * 1024 }
+        fun dir(ctx: Context) = File(File(ctx.filesDir, "models"), id).apply { mkdirs() }
+        fun file(ctx: Context, name: String) = File(dir(ctx), name)
+        fun ready(ctx: Context) = files.all { file(ctx, it.second).let { f -> f.exists() && f.length() > 0 } }
+        fun percent() = (done * 100 / expected.coerceAtLeast(1)).toInt().coerceIn(0, if (downloading) 99 else 100)
 
-    @Volatile var heavyDownloading = false
-        private set
-    @Volatile var heavyDone = 0L
-        private set
-    @Volatile var heavyTotal = 0L
-        private set
-    @Volatile var heavyError: String? = null
-        private set
-    @Volatile private var heavyCancel = false
+        /** 지금까지 받아 둔 크기 (다 받은 파일 + 받다 만 파일) */
+        fun partialSize(ctx: Context): Long = files.sumOf { (_, name) ->
+            val f = file(ctx, name)
+            val p = File(f.path + ".part")
+            (if (f.exists()) f.length() else 0L) + (if (p.exists()) p.length() else 0L)
+        }
+
+        fun readySize(ctx: Context): Long = files.sumOf { file(ctx, it.second).length() }
+    }
+
+    val QWEN = Pack(
+        "qwen", "고급 번역 모델", "약 1.6GB", 1_600_000_000L,
+        listOf(
+            "https://huggingface.co/litert-community/Qwen2.5-1.5B-Instruct/resolve/main/Qwen2.5-1.5B-Instruct_multi-prefill-seq_q8_ekv1280.task"
+                to "model.task"
+        )
+    )
+
+    val MANGA_OCR = Pack(
+        "manga-ocr", "만화 전용 글자 인식", "약 461MB", 461_000_000L,
+        listOf(
+            "https://huggingface.co/mayocream/manga-ocr-onnx/resolve/main/vocab.txt" to "vocab.txt",
+            "https://huggingface.co/mayocream/manga-ocr-onnx/resolve/main/decoder_model.onnx" to "decoder_model.onnx",
+            "https://huggingface.co/mayocream/manga-ocr-onnx/resolve/main/encoder_model.onnx" to "encoder_model.onnx",
+        )
+    )
+
+    val packs = listOf(QWEN, MANGA_OCR)
+
+    fun anyDownloading() = packs.any { it.downloading }
 
     /** 받는 중 진행 상황이 바뀔 때 (메인 스레드) */
     val listeners = mutableListOf<() -> Unit>()
@@ -58,86 +96,101 @@ object ModelStore {
         }
     }
 
-    fun heavyPercent(): Int = if (heavyTotal > 0) (heavyDone * 100 / heavyTotal).toInt() else 0
+    /** 예전 버전에서 받아 둔 고급 모델 파일을 새 자리로 옮김 */
+    fun migrate(ctx: Context) {
+        val old = File(File(ctx.filesDir, "models"), "qwen2.5-1.5b-q8.task")
+        if (old.exists()) {
+            val f = QWEN.file(ctx, "model.task")
+            if (!f.exists()) old.renameTo(f) else old.delete()
+        }
+        File(old.path + ".part").let { if (it.exists()) it.renameTo(File(QWEN.file(ctx, "model.task").path + ".part")) }
+    }
 
-    /** 받다 만 파일이 있으면 그 뒤부터 이어받음 */
-    fun downloadHeavy(ctx: Context) {
-        if (heavyDownloading) return
+    /** 묶음 받기 (다 받은 파일은 건너뛰고, 받다 만 파일은 이어받음) */
+    fun download(ctx: Context, pack: Pack) {
+        if (pack.downloading) return
         val app = ctx.applicationContext
-        heavyDownloading = true
-        heavyCancel = false
-        heavyError = null
+        pack.downloading = true
+        pack.cancel = false
+        pack.error = null
+        pack.done = pack.partialSize(app)
         notifyChange(app, true)
         Thread {
-            val part = heavyPart(app)
             try {
-                var from = if (part.exists()) part.length() else 0L
-                val port = Bypass.port()
-                val c = (if (port != null) URL(HEAVY_URL).openConnection(Proxy(Proxy.Type.HTTP, InetSocketAddress("127.0.0.1", port)))
-                else URL(HEAVY_URL).openConnection()) as HttpURLConnection
-                c.connectTimeout = 20000
-                c.readTimeout = 60000
-                c.instanceFollowRedirects = true
-                if (from > 0) c.setRequestProperty("Range", "bytes=$from-")
-                val code = c.responseCode
-                if (code == 200) from = 0L   // 서버가 이어받기를 안 받아 줌 → 처음부터
-                else if (code != 206) throw Exception("서버 응답 $code")
-                val len = c.contentLengthLong
-                heavyTotal = if (len > 0) from + len else 0L
-                heavyDone = from
-                RandomAccessFile(part, "rw").use { raf ->
-                    raf.setLength(from)
-                    raf.seek(from)
-                    c.inputStream.use { ins ->
-                        val buf = ByteArray(256 * 1024)
-                        while (!heavyCancel) {
-                            val n = ins.read(buf)
-                            if (n < 0) break
-                            raf.write(buf, 0, n)
-                            heavyDone += n
-                            notifyChange(app)
-                        }
+                var finished = 0L
+                for ((url, name) in pack.files) {
+                    if (pack.cancel) break
+                    val f = pack.file(app, name)
+                    if (f.exists() && f.length() > 0) {
+                        finished += f.length()
+                        continue
                     }
-                }
-                c.disconnect()
-                if (heavyCancel) {
-                    heavyError = "멈춤 (다시 누르면 이어받아요)"
-                } else if (heavyTotal > 0 && heavyDone < heavyTotal) {
-                    heavyError = "다 받지 못했어요 (다시 누르면 이어받아요)"
-                } else {
-                    val f = heavyFile(app)
+                    val part = File(f.path + ".part")
+                    var from = if (part.exists()) part.length() else 0L
+                    val port = Bypass.port()
+                    val c = (if (port != null) URL(url).openConnection(Proxy(Proxy.Type.HTTP, InetSocketAddress("127.0.0.1", port)))
+                    else URL(url).openConnection()) as HttpURLConnection
+                    c.connectTimeout = 20000
+                    c.readTimeout = 60000
+                    c.instanceFollowRedirects = true
+                    if (from > 0) c.setRequestProperty("Range", "bytes=$from-")
+                    val code = c.responseCode
+                    if (code == 200) from = 0L          // 이어받기를 안 받아 주면 처음부터
+                    else if (code == 416) {              // 이미 다 받은 파일
+                        c.disconnect()
+                        part.renameTo(f)
+                        finished += f.length()
+                        continue
+                    } else if (code != 206) throw Exception("서버 응답 $code ($name)")
+                    val len = c.contentLengthLong
+                    RandomAccessFile(part, "rw").use { raf ->
+                        raf.setLength(from)
+                        raf.seek(from)
+                        var cur = from
+                        c.inputStream.use { ins ->
+                            val buf = ByteArray(256 * 1024)
+                            while (!pack.cancel) {
+                                val n = ins.read(buf)
+                                if (n < 0) break
+                                raf.write(buf, 0, n)
+                                cur += n
+                                pack.done = finished + cur
+                                notifyChange(app)
+                            }
+                        }
+                        if (!pack.cancel && len > 0 && cur < from + len) throw Exception("$name 을(를) 다 받지 못했어요")
+                    }
+                    c.disconnect()
+                    if (pack.cancel) break
                     f.delete()
-                    if (!part.renameTo(f)) throw Exception("파일 정리 실패")
+                    if (!part.renameTo(f)) throw Exception("파일 정리 실패 ($name)")
+                    finished += f.length()
+                    pack.done = finished
                 }
+                if (pack.cancel) pack.error = "멈춤 · 다시 누르면 이어받아요"
             } catch (e: Exception) {
-                heavyError = "받기 실패: ${e.message ?: e.javaClass.simpleName} (다시 누르면 이어받아요)"
+                pack.error = "받기 실패: ${e.message ?: e.javaClass.simpleName} · 다시 누르면 이어받아요"
             }
-            heavyDownloading = false
+            pack.downloading = false
             notifyChange(app, true)
-            main.post { onHeavyDone?.invoke(heavyReady(app)) }
+            val ok = pack.ready(app)
+            main.post { pack.onDone?.invoke(ok) }
         }.start()
     }
 
-    /** 고급 모델 받기가 끝났을 때 (성공 여부) */
-    var onHeavyDone: ((Boolean) -> Unit)? = null
-
-    fun cancelHeavy() {
-        heavyCancel = true
+    fun cancel(pack: Pack) {
+        pack.cancel = true
     }
 
-    fun deleteHeavy(ctx: Context) {
-        heavyCancel = true
-        heavyFile(ctx).delete()
-        heavyPart(ctx).delete()
-        heavyDone = 0
-        heavyTotal = 0
-        heavyError = null
+    fun delete(ctx: Context, pack: Pack) {
+        pack.cancel = true
+        pack.dir(ctx).deleteRecursively()
+        pack.done = 0
+        pack.error = null
         notifyChange(ctx.applicationContext, true)
     }
 
-    fun heavyPartialSize(ctx: Context) = heavyPart(ctx).let { if (it.exists()) it.length() else 0L }
-
-    // ================= 일반 모델 (ML Kit 번역) =================
+    // ================= 일반 번역 모델 (ML Kit) =================
 
     private fun jaKoOptions() = TranslatorOptions.Builder()
         .setSourceLanguage(TranslateLanguage.JAPANESE)

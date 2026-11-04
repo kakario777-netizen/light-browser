@@ -142,6 +142,7 @@ class MainActivity : Activity() {
         grabber = Grabber(this)
         history = HistoryPage(this)
         live = LiveTranslate(this)
+        ModelStore.migrate(this)
         JobStore.listeners.add(jobsListener)
         Downloads.onActivity = { onJobsChanged() }
         JobStore.onFinished = { j -> onGrabFinished(j) }

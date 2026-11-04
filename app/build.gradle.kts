@@ -51,4 +51,6 @@ dependencies {
     implementation("com.google.android.gms:play-services-mlkit-text-recognition-japanese:16.0.1")
     implementation("com.google.mlkit:translate:17.0.3")
     implementation("com.google.mediapipe:tasks-genai:0.10.27")
+    // 만화 전용 글자 인식(manga-ocr) 실행 엔진
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
 }

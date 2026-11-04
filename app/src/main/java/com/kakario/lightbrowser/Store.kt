@@ -98,6 +98,11 @@ class Store(ctx: Context) {
         get() = p.getInt("autoZip", 0)
         set(v) = p.edit().putInt("autoZip", v).apply()
 
+    /** 만화 글자 인식: 0 = 일반(ML Kit), 1 = 만화 전용(manga-ocr) */
+    var ocrEngine: Int
+        get() = p.getInt("ocrEngine", 0)
+        set(v) = p.edit().putInt("ocrEngine", v).apply()
+
     /** 만화 번역 모델: 0 = 일반(가벼움), 1 = 고급(무거움) */
     var transModel: Int
         get() = p.getInt("transModel", 0)

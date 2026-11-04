@@ -240,48 +240,50 @@ class Pages(private val a: MainActivity) {
         box.addView(ScrollView(a).apply { addView(body) },
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         val st = a.store
+        val refreshers = ArrayList<() -> Unit>()
 
         section(body, "실시간 만화 번역")
         row(body, "인식 언어", "일본어 → 한국어\n(영어·중국어·스페인어는 다음에 추가)", null, null)
 
-        section(body, "일본 만화 번역에 쓸 모델")
-        var lightPick: TextView? = null
-        var heavyPick: TextView? = null
-        fun mark() {
-            lightPick?.text = if (st.transModel == 0) "●" else "○"
-            heavyPick?.text = if (st.transModel == 1) "●" else "○"
-        }
-        fun pickMark() = TextView(a).apply {
-            textSize = 20f
-            setTextColor(a.getColor(R.color.accent))
-            setPadding(a.dp(12), 0, a.dp(4), 0)
-        }
-        lightPick = pickMark()
-        heavyPick = pickMark()
-        row(body, "일반 모델 (가벼움)", "구글 ML Kit · ${ModelStore.LIGHT_SIZE} · 빠름 · 뜻은 통하지만 말투가 어색할 수 있어요", lightPick) {
-            st.transModel = 0
-            mark()
+        // ---- 글자 인식 ----
+        section(body, "글자 인식 (OCR)")
+        choice(body, refreshers,
+            "일반 인식", "구글 ML Kit · 처음 켤 때 자동으로 받음 · 빠름 · 손글씨풍·세로쓰기는 놓칠 수 있어요",
+            { st.ocrEngine == 0 }) { st.ocrEngine = 0; a.live.modelChanged() }
+        choice(body, refreshers,
+            "만화 전용 인식", "manga-ocr · ${ModelStore.MANGA_OCR.sizeText} · 세로쓰기·손글씨풍에 강함 · 말풍선마다 조금 느림",
+            { st.ocrEngine == 1 }) {
+            if (!ModelStore.MANGA_OCR.ready(a)) {
+                needDownload(ModelStore.MANGA_OCR) { st.ocrEngine = 1; a.live.modelChanged(); refreshers.forEach { it() } }
+                return@choice
+            }
+            st.ocrEngine = 1
             a.live.modelChanged()
         }
-        row(body, "고급 모델 (무거움)", "Qwen2.5 1.5B · ${ModelStore.HEAVY_SIZE} · 더 자연스러움 · 한 페이지에 몇 초 걸려요", heavyPick) {
-            if (!ModelStore.heavyReady(a)) {
-                AlertDialog.Builder(a)
-                    .setMessage("고급 모델을 아직 받지 않았어요. 아래 '고급 모델 받기'에서 먼저 받아 주세요 (${ModelStore.HEAVY_SIZE}).")
-                    .setPositiveButton("확인", null).show()
-                return@row
+
+        // ---- 번역 ----
+        section(body, "일본 만화 번역에 쓸 모델")
+        choice(body, refreshers,
+            "일반 모델 (가벼움)", "구글 ML Kit · ${ModelStore.LIGHT_SIZE} · 빠름 · 뜻은 통하지만 말투가 어색할 수 있어요",
+            { st.transModel == 0 }) { st.transModel = 0; a.live.modelChanged() }
+        choice(body, refreshers,
+            "고급 모델 (무거움)", "Qwen2.5 1.5B · ${ModelStore.QWEN.sizeText} · 더 자연스러움 · 한 페이지에 몇 초 걸려요",
+            { st.transModel == 1 }) {
+            if (!ModelStore.QWEN.ready(a)) {
+                needDownload(ModelStore.QWEN) { st.transModel = 1; a.live.modelChanged(); refreshers.forEach { it() } }
+                return@choice
             }
             st.transModel = 1
-            mark()
             a.live.modelChanged()
         }
-        mark()
 
+        // ---- 받기·지우기 ----
         section(body, "모델 받기 · 지우기")
         var lightSub: TextView? = null
-        lightSub = row(body, "일반 모델", "확인 중…", null) {
+        lightSub = row(body, "일반 번역 모델", "확인 중…", null) {
             ModelStore.lightReady { ok ->
                 if (ok) {
-                    AlertDialog.Builder(a).setMessage("일반 모델을 지울까요? 실시간 번역을 다시 켜면 다시 받아요.")
+                    AlertDialog.Builder(a).setMessage("일반 번역 모델을 지울까요? 실시간 번역을 다시 켜면 다시 받아요.")
                         .setPositiveButton("지우기") { _, _ ->
                             ModelStore.deleteLight { lightSub?.text = "안 받음 · ${ModelStore.LIGHT_SIZE}" }
                         }.setNegativeButton("취소", null).show()
@@ -295,61 +297,91 @@ class Pages(private val a: MainActivity) {
         }
         ModelStore.lightReady { ok -> lightSub?.text = if (ok) "받음 · 눌러서 지우기" else "안 받음 · ${ModelStore.LIGHT_SIZE} · 눌러서 받기" }
 
-        var heavySub: TextView? = null
-        val heavyBar = ProgressBar(a, null, android.R.attr.progressBarStyleHorizontal).apply {
+        packRow(body, refreshers, ModelStore.MANGA_OCR) {
+            if (st.ocrEngine == 1) { st.ocrEngine = 0; a.live.modelChanged() }
+        }
+        packRow(body, refreshers, ModelStore.QWEN) {
+            if (st.transModel == 1) { st.transModel = 0; a.live.modelChanged() }
+        }
+
+        refreshers.forEach { it() }
+        modelListener = { refreshers.forEach { it() } }
+        ModelStore.listeners.add(modelListener)
+    }
+
+    /** 고르기 줄 (●/○) */
+    private fun choice(body: LinearLayout, refreshers: MutableList<() -> Unit>, title: String, sub: String,
+                       isOn: () -> Boolean, pick: () -> Unit) {
+        val mark = TextView(a).apply {
+            textSize = 20f
+            setTextColor(a.getColor(R.color.accent))
+            setPadding(a.dp(12), 0, a.dp(4), 0)
+        }
+        row(body, title, sub, mark) {
+            pick()
+            refreshers.forEach { it() }
+        }
+        refreshers.add { mark.text = if (isOn()) "●" else "○" }
+    }
+
+    /** 아직 안 받은 모델을 고르면: 받을지 묻고, 다 받으면 then */
+    private fun needDownload(pack: ModelStore.Pack, then: () -> Unit) {
+        AlertDialog.Builder(a)
+            .setTitle("${pack.title} 받기")
+            .setMessage("${pack.title}을(를) 아직 받지 않았어요 (${pack.sizeText}).\n와이파이에서 받는 걸 권해요. 받는 동안 다른 걸 해도 되고, 끊기면 이어서 받아요.\n다 받으면 바로 이 모델로 바꿀게요.")
+            .setPositiveButton("받기") { _, _ ->
+                a.askBackgroundPermissions()
+                pack.onDone = { ok ->
+                    if (ok) {
+                        a.toastMsg("${pack.title}을(를) 다 받았어요")
+                        then()
+                    }
+                }
+                ModelStore.download(a, pack)
+            }
+            .setNegativeButton("취소", null)
+            .show()
+    }
+
+    /** 큰 모델 받기·멈추기·지우기 줄 + 진행 막대 */
+    private fun packRow(body: LinearLayout, refreshers: MutableList<() -> Unit>, pack: ModelStore.Pack, onDeleted: () -> Unit) {
+        val bar = ProgressBar(a, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 100
             progressTintList = ColorStateList.valueOf(a.getColor(R.color.accent))
             visibility = View.GONE
         }
-        fun heavyText() {
-            val part = ModelStore.heavyPartialSize(a)
-            heavySub?.text = when {
-                ModelStore.heavyDownloading ->
-                    "받는 중 ${ModelStore.heavyPercent()}% · ${Downloads.size(ModelStore.heavyDone)}" +
-                        (if (ModelStore.heavyTotal > 0) " / ${Downloads.size(ModelStore.heavyTotal)}" else "") + " · 눌러서 멈추기"
-                ModelStore.heavyReady(a) -> "받음 · ${Downloads.size(ModelStore.heavyFile(a).length())} · 눌러서 지우기"
-                ModelStore.heavyError != null -> ModelStore.heavyError!!
-                part > 0 -> "받다 멈춤 · ${Downloads.size(part)} · 눌러서 이어받기"
-                else -> "안 받음 · ${ModelStore.HEAVY_SIZE} · 눌러서 받기 (와이파이 권장)"
-            }
-            heavyBar.visibility = if (ModelStore.heavyDownloading) View.VISIBLE else View.GONE
-            heavyBar.progress = ModelStore.heavyPercent()
-        }
-        heavySub = row(body, "고급 모델", "", null) {
+        var sub: TextView? = null
+        sub = row(body, pack.title, "", null) {
             when {
-                ModelStore.heavyDownloading -> ModelStore.cancelHeavy()
-                ModelStore.heavyReady(a) -> AlertDialog.Builder(a)
-                    .setMessage("고급 모델(${Downloads.size(ModelStore.heavyFile(a).length())})을 지울까요?")
+                pack.downloading -> ModelStore.cancel(pack)
+                pack.ready(a) -> AlertDialog.Builder(a)
+                    .setMessage("${pack.title}(${Downloads.size(pack.readySize(a))})을(를) 지울까요?")
                     .setPositiveButton("지우기") { _, _ ->
-                        ModelStore.deleteHeavy(a)
-                        if (st.transModel == 1) { st.transModel = 0; mark(); a.live.modelChanged() }
-                        heavyText()
+                        ModelStore.delete(a, pack)
+                        onDeleted()
+                        refreshers.forEach { it() }
                     }.setNegativeButton("취소", null).show()
-                else -> AlertDialog.Builder(a)
-                    .setTitle("고급 모델 받기")
-                    .setMessage("${ModelStore.HEAVY_SIZE}를 받아요. 와이파이에서 받는 걸 권해요.\n받는 동안 다른 걸 해도 되고, 끊기면 이어서 받아요.")
-                    .setPositiveButton("받기") { _, _ ->
-                        a.askBackgroundPermissions()
-                        ModelStore.onHeavyDone = { ok ->
-                            if (ok) {
-                                a.toastMsg("고급 모델을 다 받았어요")
-                                if (st.transModel != 1) {
-                                    AlertDialog.Builder(a).setMessage("고급 모델을 지금부터 쓸까요?")
-                                        .setPositiveButton("쓰기") { _, _ -> st.transModel = 1; mark(); a.live.modelChanged() }
-                                        .setNegativeButton("나중에", null).show()
-                                }
-                            }
-                        }
-                        ModelStore.downloadHeavy(a)
-                    }.setNegativeButton("취소", null).show()
+                else -> {
+                    a.askBackgroundPermissions()
+                    ModelStore.download(a, pack)
+                }
             }
         }
-        body.addView(heavyBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, a.dp(6)).apply {
+        body.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, a.dp(6)).apply {
             leftMargin = a.dp(20); rightMargin = a.dp(20); bottomMargin = a.dp(8)
         })
-        heavyText()
-        modelListener = { heavyText() }
-        ModelStore.listeners.add(modelListener)
+        refreshers.add {
+            val part = pack.partialSize(a)
+            sub?.text = when {
+                pack.downloading -> "받는 중 ${pack.percent()}% · ${Downloads.size(pack.done)} / ${pack.sizeText} · 눌러서 멈추기"
+                pack.ready(a) -> "받음 · ${Downloads.size(pack.readySize(a))} · 눌러서 지우기"
+                pack.error != null -> pack.error!!
+                part > 0 -> "받다 멈춤 · ${Downloads.size(part)} · 눌러서 이어받기"
+                else -> "안 받음 · ${pack.sizeText} · 눌러서 받기 (와이파이 권장)"
+            }
+            bar.visibility = if (pack.downloading) View.VISIBLE else View.GONE
+            bar.progress = pack.percent()
+        }
     }
 
     private fun folderName(tree: String?): String {

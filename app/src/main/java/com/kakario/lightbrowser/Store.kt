@@ -83,6 +83,10 @@ class Store(ctx: Context) {
         get() = p.getInt("textZoom", 100)
         set(v) = p.edit().putInt("textZoom", v).apply()
 
+    var askedBattery: Boolean
+        get() = p.getBoolean("askedBattery", false)
+        set(v) = p.edit().putBoolean("askedBattery", v).apply()
+
     var darkPages: Boolean
         get() = p.getBoolean("darkPages", true)
         set(v) = p.edit().putBoolean("darkPages", v).apply()

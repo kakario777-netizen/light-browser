@@ -88,13 +88,22 @@ class Grabber(private val a: MainActivity) {
     }
 
     /** 넘기며 모으기 등에서 이미 주소 목록을 가진 경우 */
-    fun startWithUrls(urls: List<String>, pageUrl: String?, userAgent: String?, name: String) {
+    /** 화면이 꺼진 채로 받는 중인지 (알림창으로 진행 상황 표시) */
+    private var bgMode = false
+
+    fun startWithUrls(urls: List<String>, pageUrl: String?, userAgent: String?, name: String, autoStart: Boolean = false) {
         prepare(name, pageUrl, userAgent)
         if (urls.isEmpty()) {
             showFail("모은 이미지가 없어요.", null)
             return
         }
-        confirmDownload(urls, "넘기며 모으기")
+        if (autoStart) {
+            bgMode = true
+            if (!BgWork.running) BgWork.start(a, "이미지 받는 중", collecting = false)
+            BgWork.onStop = null
+            BgWork.onCancel = { main.post { close() } }
+            downloadAll(urls)
+        } else confirmDownload(urls, "넘기며 모으기")
     }
 
     fun start(imageUrl: String, pageUrl: String?, userAgent: String?) {
@@ -498,6 +507,7 @@ class Grabber(private val a: MainActivity) {
                     }
                     val fails = failCount.get()
                     setStatus("받는 중… $n / $total" + if (fails > 0) " (실패 $fails)" else "", indeterminate = false, max = total, value = n)
+                    if (bgMode) BgWork.update(a, "이미지 받는 중 $n / $total", collecting = false, progress = n, max = total)
                     if (n == total) finishedDownloading(fails)
                 }
             }
@@ -506,6 +516,10 @@ class Grabber(private val a: MainActivity) {
 
     private fun finishedDownloading(fails: Int) {
         val size = pics.sumOf { it.file.length() }
+        if (bgMode) {
+            bgMode = false
+            BgWork.done(a, "$title · ${pics.size}장 받음. 눌러서 확인하고 압축하세요")
+        }
         setStatus(
             "${pics.size}개 받음 · ${Downloads.size(size)}" + (if (fails > 0) " · 실패 $fails" else "") +
                 "\n눌러서 빼거나 넣고, 꾸욱 눌러 크게 보기",
@@ -704,6 +718,7 @@ class Grabber(private val a: MainActivity) {
     }
 
     fun close() {
+        if (bgMode) { bgMode = false; BgWork.stop(a) }
         canceled = true
         closePreview()
         root?.let { a.frame.removeView(it) }

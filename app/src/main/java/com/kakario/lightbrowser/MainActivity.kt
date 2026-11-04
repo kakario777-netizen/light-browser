@@ -160,15 +160,23 @@ class MainActivity : Activity() {
         }
     }
 
+    /** 앱 화면이 지금 보이는지 (화면 꺼짐·홈으로 나가면 false) */
+    var isShown = false
+        private set
+
     override fun onPause() {
         super.onPause()
+        isShown = false
         saveSession()
         CookieManager.getInstance().flush()
-        tabs.getOrNull(cur)?.webView?.onPause()
+        // 넘기며 모으는 중인 페이지는 멈추지 않는다
+        tabs.getOrNull(cur)?.webView?.let { if (!collector.holds(it)) it.onPause() }
     }
 
     override fun onResume() {
         super.onResume()
+        isShown = true
+        BgWork.clearDone(this)
         tabs.getOrNull(cur)?.let { if (!it.home) it.webView.onResume() }
     }
 
@@ -1514,8 +1522,35 @@ class MainActivity : Activity() {
         collector.begin()
     }
 
-    fun openGrabberWith(urls: List<String>, page: String?, ua: String?, name: String) {
-        grabber.startWithUrls(urls, page, ua, name)
+    fun openGrabberWith(urls: List<String>, page: String?, ua: String?, name: String, autoStart: Boolean = false) {
+        grabber.startWithUrls(urls, page, ua, name, autoStart)
+    }
+
+    /** 알림 표시 권한, 배터리 최적화 제외 (백그라운드 작업이 끊기지 않게) */
+    fun askBackgroundPermissions() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 9)
+        }
+        val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
+        if (!pm.isIgnoringBatteryOptimizations(packageName) && !store.askedBattery) {
+            store.askedBattery = true
+            AlertDialog.Builder(this)
+                .setTitle("화면이 꺼져도 계속 모으려면")
+                .setMessage("배터리 절약 때문에 작업이 끊기지 않도록, 이 앱을 배터리 최적화에서 빼 주세요.")
+                .setPositiveButton("허용하러 가기") { _, _ ->
+                    try {
+                        @SuppressLint("BatteryLife")
+                        val i = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+                        startActivity(i)
+                    } catch (e: Exception) {
+                        toast("설정 화면을 열 수 없어요")
+                    }
+                }
+                .setNegativeButton("나중에", null)
+                .show()
+        }
     }
 
     /** 지금 페이지에서 가장 크게 보이는 이미지를 기준으로 폴더 받기 */

@@ -45,6 +45,14 @@ class Collector(private val a: MainActivity) {
     private var lastTapAt = 0L
     private var failedTaps = 0
 
+    // 넘기는 방법: 0 = 실제 터치, 1 = 페이지 안에서 클릭, 2 = 페이지 안에서 터치 신호
+    private var method = 0
+    private var goodMethod = -1     // 이 사이트에서 통한 방법
+    private var lastMethod = 0
+
+    /** 이 웹뷰를 쓰는 중이면 앱을 내려도 멈추지 않게 한다 */
+    fun holds(w: WebView?) = w != null && w === wv && running
+
     val isActive get() = bar != null
 
     // ================= 시작 =================
@@ -69,6 +77,7 @@ class Collector(private val a: MainActivity) {
             "취소" to { stop(cancel = true) },
         ))
         snap()   // 1페이지 이미지 먼저
+        a.askBackgroundPermissions()
     }
 
     /** 사용자가 넘기는 자리를 꾸욱 눌렀을 때 (웹뷰 좌표) */
@@ -86,6 +95,13 @@ class Collector(private val a: MainActivity) {
         auto = autoTap
         lastNewAt = SystemClock.uptimeMillis()
         lastTapAt = 0L
+        goodMethod = -1
+        method = 0
+        if (autoTap) {
+            BgWork.start(a, "페이지 넘기며 모으는 중", collecting = true)
+            BgWork.onStop = { main.post { finish() } }
+            BgWork.onCancel = { main.post { stop(cancel = true) } }
+        }
         setButtons(listOf(
             "멈추고 받기" to { finish() },
             "취소" to { stop(cancel = true) },
@@ -114,13 +130,15 @@ class Collector(private val a: MainActivity) {
                     when {
                         // 새 이미지가 나오고 0.8초 지나면 다음 장
                         lastNewAt > lastTapAt && now - lastNewAt > 800 -> {
+                            if (lastTapAt != 0L) goodMethod = lastMethod   // 지난번 방법이 통함
                             failedTaps = 0
                             tap()
                         }
                         // 6초 넘게 새 이미지가 없으면 한 번 더 눌러 보고, 3번 연속이면 끝
                         lastTapAt == 0L || sinceTap > 6000 -> {
                             if (lastTapAt != 0L) failedTaps++
-                            if (failedTaps >= 3) {
+                            // 화면이 안 보일 때는 다른 방법도 시도해 보므로 기회를 더 줌
+                            if (failedTaps >= (if (a.isShown) 3 else 6)) {
                                 setText("더 넘어가지 않아요. 마지막 페이지로 보고 마무리할게요")
                                 main.postDelayed({ finish() }, 900)
                                 return@snap
@@ -137,6 +155,17 @@ class Collector(private val a: MainActivity) {
     private fun tap() {
         val w = wv ?: return
         lastTapAt = SystemClock.uptimeMillis()
+        // 화면이 보이면 실제 터치. 안 보이면(화면 꺼짐·홈) 통했던 방법 → 안 되면 방법을 바꿔 가며
+        val m = when {
+            a.isShown && goodMethod < 1 -> 0
+            goodMethod >= 0 -> goodMethod
+            else -> failedTaps % 3
+        }
+        lastMethod = m
+        if (m == 1 || m == 2) {
+            jsTap(w, m)
+            return
+        }
         val t = SystemClock.uptimeMillis()
         val down = MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, tapX, tapY, 0)
         w.dispatchTouchEvent(down)
@@ -148,6 +177,24 @@ class Collector(private val a: MainActivity) {
             up.recycle()
         }, 60)
         flashMarker()
+    }
+
+    /** 페이지 안에서 넘기는 자리의 요소를 직접 누른다 (화면이 안 보여도 동작) */
+    private fun jsTap(w: WebView, m: Int) {
+        val vw = w.width.coerceAtLeast(1)
+        val vh = w.height.coerceAtLeast(1)
+        val js = "(function(X,Y,VW,VH,M){var cx=X*innerWidth/VW,cy=Y*innerHeight/VH;" +
+            "var e=document.elementFromPoint(cx,cy);if(!e)return 'none';" +
+            "if(M==1){var a=e.closest&&e.closest('a[href]');" +
+            "['pointerdown','mousedown','pointerup','mouseup'].forEach(function(t){try{var ev=(t.indexOf('pointer')==0&&window.PointerEvent)?" +
+            "new PointerEvent(t,{bubbles:true,cancelable:true,clientX:cx,clientY:cy,pointerType:'touch',isPrimary:true}):" +
+            "new MouseEvent(t,{bubbles:true,cancelable:true,clientX:cx,clientY:cy,view:window});e.dispatchEvent(ev);}catch(x){}});" +
+            "if(a&&!e.onclick)a.click();else e.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,clientX:cx,clientY:cy,view:window}));}" +
+            "else{try{var t=new Touch({identifier:Date.now(),target:e,clientX:cx,clientY:cy});" +
+            "e.dispatchEvent(new TouchEvent('touchstart',{bubbles:true,cancelable:true,touches:[t],targetTouches:[t],changedTouches:[t]}));" +
+            "e.dispatchEvent(new TouchEvent('touchend',{bubbles:true,cancelable:true,touches:[],targetTouches:[],changedTouches:[t]}));}catch(x){}}" +
+            "return e.tagName;})(" + tapX + "," + tapY + "," + vw + "," + vh + "," + m + ")"
+        w.evaluateJavascript(js, null)
     }
 
     /** 화면에 크게 보이는 이미지 주소를 모은다 */
@@ -184,6 +231,7 @@ class Collector(private val a: MainActivity) {
 
     private fun update() {
         if (!running) return
+        if (auto) BgWork.update(a, "페이지 넘기며 모으는 중 · ${found.size}장", collecting = true)
         setText((if (auto) "넘기며 모으는 중" else "직접 넘기는 동안 모으는 중") + " · ${found.size}장" +
             if (skipped > 0 && found.isEmpty()) "\n(이 사이트 이미지는 서버 주소가 없어 받을 수 없을 수 있어요)" else "")
     }
@@ -194,16 +242,19 @@ class Collector(private val a: MainActivity) {
         val list = found.toList()
         val page = startPage
         val w = wv
-        stop(cancel = false)
+        val bg = !a.isShown && list.isNotEmpty()
+        stop(cancel = false, keepBg = bg)
         if (list.isEmpty()) {
             a.toastMsg("모은 이미지가 없어요")
             return
         }
         val name = (w?.title?.takeIf { it.isNotBlank() } ?: android.net.Uri.parse(page ?: "").host ?: "images").take(40)
-        a.openGrabberWith(list, page, w?.settings?.userAgentString, name)
+        // 화면이 안 보이는 중이면 묻지 않고 바로 받기까지 이어서 한다
+        a.openGrabberWith(list, page, w?.settings?.userAgentString, name, autoStart = !a.isShown)
     }
 
-    fun stop(cancel: Boolean) {
+    fun stop(cancel: Boolean, keepBg: Boolean = false) {
+        if (!keepBg) BgWork.stop(a)
         running = false
         waitingForPoint = false
         main.removeCallbacks(loop)

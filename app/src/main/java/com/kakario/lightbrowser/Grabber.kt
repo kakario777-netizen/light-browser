@@ -52,6 +52,7 @@ class Grabber(private val a: MainActivity) {
     private var statusText: TextView? = null
     private var bar: ProgressBar? = null
     private var actions: LinearLayout? = null
+    private var failBox: LinearLayout? = null
     private var grid: RecyclerView? = null
     private var preview: View? = null
 
@@ -74,21 +75,35 @@ class Grabber(private val a: MainActivity) {
     // ================= 시작 =================
 
     /** imageUrl: 기준 이미지 주소, pageUrl: 지금 페이지(Referer로 씀) */
-    fun start(imageUrl: String, pageUrl: String?, userAgent: String?) {
+    private fun prepare(name: String, pageUrl: String?, userAgent: String?) {
         if (isOpen) close()
-        if (!imageUrl.startsWith("http")) {
-            a.toastMsg("이 이미지는 서버 주소가 없어서 폴더를 찾을 수 없어요")
-            return
-        }
         referer = pageUrl
         ua = userAgent
         canceled = false
         pics.clear()
         cache.evictAll()
-        val folder = folderOf(imageUrl)
-        title = folderName(folder)
+        title = name
         dir = File(a.cacheDir, "grab/" + System.currentTimeMillis()).apply { mkdirs() }
         buildUi()
+    }
+
+    /** 넘기며 모으기 등에서 이미 주소 목록을 가진 경우 */
+    fun startWithUrls(urls: List<String>, pageUrl: String?, userAgent: String?, name: String) {
+        prepare(name, pageUrl, userAgent)
+        if (urls.isEmpty()) {
+            showFail("모은 이미지가 없어요.", null)
+            return
+        }
+        confirmDownload(urls, "넘기며 모으기")
+    }
+
+    fun start(imageUrl: String, pageUrl: String?, userAgent: String?) {
+        if (!imageUrl.startsWith("http")) {
+            a.toastMsg("이 이미지는 서버 주소가 없어서 폴더를 찾을 수 없어요. '넘기며 모으기'를 써 보세요")
+            return
+        }
+        val folder = folderOf(imageUrl)
+        prepare(folderName(folder), pageUrl, userAgent)
         setStatus("폴더 확인 중…\n$folder", indeterminate = true)
 
         Thread {
@@ -101,15 +116,18 @@ class Grabber(private val a: MainActivity) {
             }
             if (urls.isEmpty() && !canceled) {
                 main.post { setStatus("폴더 목록이 막혀 있어요. 번호로 이어 찾는 중…", indeterminate = true) }
-                urls = sequence(imageUrl)
-                if (urls.size > 1) how = "번호 이어 찾기"
+                val run = lastRunInFile(imageUrl)
+                if (run != null) {
+                    urls = sequence(imageUrl, run, maxMiss = 8, tryExts = false, strip = false)
+                    if (urls.size > 1) how = "번호 이어 찾기"
+                }
             }
             main.post {
                 if (canceled || !isOpen) return@post
                 when {
-                    urls.size <= 1 -> setStatus(
-                        "이 폴더에서는 이미지를 더 찾지 못했어요.\n\n" +
-                            "서버가 폴더 목록을 숨기고 있고, 파일 이름에 이어지는 번호도 없는 경우예요.", indeterminate = false
+                    urls.size <= 1 -> showFail(
+                        "이 폴더에서는 이미지를 더 찾지 못했어요.\n" +
+                            "주소를 나눠 보고 다른 번호로 찾거나, 페이지를 넘기며 모아 보세요.", imageUrl
                     )
                     else -> confirmDownload(urls, how)
                 }
@@ -117,7 +135,152 @@ class Grabber(private val a: MainActivity) {
         }.start()
     }
 
+    /** 못 찾았을 때: 주소 분석 / 넘기며 모으기 버튼 */
+    private fun showFail(msg: String, imageUrl: String?) {
+        setStatus(msg, indeterminate = false)
+        val box = failBox ?: return
+        box.removeAllViews()
+        box.visibility = View.VISIBLE
+        if (imageUrl != null) {
+            box.addView(button("주소 분석해서 찾기", filled = true) { analyze(imageUrl, referer, ua) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, a.dp(46)).apply { bottomMargin = a.dp(8) })
+        }
+        box.addView(button("페이지 넘기며 모으기", filled = imageUrl == null) {
+            close()
+            a.startCollector()
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, a.dp(46)))
+    }
+
+    // ================= 주소 분석 =================
+
+    private class Run(val start: Int, val end: Int)
+
+    /** 주소에서 사이트 이름 뒤에 있는 숫자 덩어리들 */
+    private fun runs(url: String): List<Run> {
+        val hostEnd = url.indexOf('/', url.indexOf("://") + 3).let { if (it < 0) url.length else it }
+        return Regex("\\d+").findAll(url).filter { it.range.first >= hostEnd && it.value.length <= 12 }
+            .map { Run(it.range.first, it.range.last + 1) }.toList()
+    }
+
+    /** 파일 이름 안의 마지막 숫자 (기본 선택) */
+    private fun lastRunInFile(url: String): Run? {
+        val q = url.indexOf('?').let { if (it < 0) url.length else it }
+        val fileStart = url.lastIndexOf('/', q - 1) + 1
+        return runs(url).lastOrNull { it.start >= fileStart && it.end <= q }
+    }
+
+    /** 이미지 주소를 나눠 보여주고, 어느 번호를 바꿔 가며 찾을지 고르게 한다 */
+    fun analyze(imageUrl: String, pageUrl: String?, userAgent: String?) {
+        if (!imageUrl.startsWith("http")) {
+            a.toastMsg("이 이미지는 서버 주소가 없어요. '넘기며 모으기'를 써 보세요")
+            return
+        }
+        val u = Uri.parse(imageUrl)
+        val q = imageUrl.indexOf('?')
+        val pathPart = if (q >= 0) imageUrl.substring(0, q) else imageUrl
+        val fileName = pathPart.substringAfterLast('/')
+        val ext = fileName.substringAfterLast('.', "").lowercase()
+        val allRuns = runs(imageUrl)
+
+        val body = LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(a.dp(22), a.dp(8), a.dp(22), a.dp(4))
+        }
+        fun label(t: String, bold: Boolean = false, size: Float = 13f, color: Int = R.color.text) = TextView(a).apply {
+            text = t
+            textSize = size
+            setTextColor(a.getColor(color))
+            if (bold) typeface = Typeface.DEFAULT_BOLD
+            setTextIsSelectable(true)
+            setPadding(0, a.dp(3), 0, a.dp(3))
+        }
+        body.addView(label("사이트   ${u.host ?: "?"}"))
+        body.addView(label("폴더   " + (u.path ?: "/").substringBeforeLast('/') + "/"))
+        body.addView(label("파일 이름   $fileName"))
+        body.addView(label("확장자   " + ext.ifEmpty { "(없음)" }))
+        if (q >= 0) body.addView(label("뒤에 붙은 값   " + imageUrl.substring(q)))
+
+        val group = android.widget.RadioGroup(a)
+        val def = lastRunInFile(imageUrl) ?: allRuns.lastOrNull()
+        if (allRuns.isEmpty()) {
+            body.addView(label("\n주소에 번호가 없어서 이어 찾기를 할 수 없어요.\n'페이지 넘기며 모으기'를 써 보세요.", color = R.color.sub))
+        } else {
+            body.addView(label("\n바꿔 가며 찾을 번호", bold = true, size = 14f, color = R.color.accent))
+            allRuns.forEachIndexed { i, run ->
+                val before = imageUrl.substring(maxOf(0, run.start - 14), run.start)
+                val after = imageUrl.substring(run.end, minOf(imageUrl.length, run.end + 8))
+                group.addView(android.widget.RadioButton(a).apply {
+                    id = 100 + i
+                    text = android.text.Html.fromHtml(
+                        "…" + TextUtils.htmlEncode(before) + "<b><font color='#E5262D'>[" +
+                            imageUrl.substring(run.start, run.end) + "]</font></b>" + TextUtils.htmlEncode(after) + "…",
+                        android.text.Html.FROM_HTML_MODE_LEGACY
+                    )
+                    textSize = 13f
+                    setTextColor(a.getColor(R.color.text))
+                    isChecked = run.start == def?.start
+                })
+            }
+            body.addView(group)
+        }
+        val extBox = android.widget.CheckBox(a).apply {
+            text = "확장자도 바꿔 가며 찾기 (jpg·png·webp·gif)"
+            isChecked = true
+            setTextColor(a.getColor(R.color.text))
+        }
+        val stripBox = android.widget.CheckBox(a).apply {
+            text = "뒤에 붙은 크기 조절 값 떼고 원본 찾기"
+            isChecked = false
+            setTextColor(a.getColor(R.color.text))
+        }
+        val missGroup = android.widget.RadioGroup(a).apply { orientation = android.widget.RadioGroup.HORIZONTAL }
+        val misses = intArrayOf(5, 20, 100)
+        misses.forEachIndexed { i, m ->
+            missGroup.addView(android.widget.RadioButton(a).apply {
+                id = 200 + i
+                text = "${m}개"
+                setTextColor(a.getColor(R.color.text))
+                isChecked = m == 20
+            })
+        }
+        if (allRuns.isNotEmpty()) {
+            body.addView(extBox)
+            if (q >= 0) body.addView(stripBox)
+            body.addView(label("\n빈 번호가 몇 개 이어지면 멈출까요", bold = true, size = 14f, color = R.color.accent))
+            body.addView(missGroup)
+        }
+
+        val b = AlertDialog.Builder(a)
+            .setTitle("이미지 주소 분석")
+            .setView(android.widget.ScrollView(a).apply { addView(body) })
+            .setNegativeButton("닫기", null)
+            .setNeutralButton("넘기며 모으기") { _, _ ->
+                close()
+                a.startCollector()
+            }
+        if (allRuns.isNotEmpty()) b.setPositiveButton("찾기") { _, _ ->
+            val run = allRuns.getOrNull(group.checkedRadioButtonId - 100) ?: def ?: return@setPositiveButton
+            val miss = misses.getOrElse(missGroup.checkedRadioButtonId - 200) { 20 }
+            runAnalyzed(imageUrl, pageUrl, userAgent, run, miss, extBox.isChecked, stripBox.isChecked && q >= 0)
+        }
+        b.show()
+    }
+
+    private fun runAnalyzed(url: String, pageUrl: String?, userAgent: String?, run: Run, miss: Int, exts: Boolean, strip: Boolean) {
+        prepare(folderName(folderOf(url)), pageUrl, userAgent)
+        setStatus("번호로 이어 찾는 중…", indeterminate = true)
+        Thread {
+            val urls = sequence(url, run, miss, exts, strip)
+            main.post {
+                if (canceled || !isOpen) return@post
+                if (urls.size <= 1) showFail("이 번호로는 이미지를 더 찾지 못했어요.\n다른 번호를 골라 보거나 넘기며 모아 보세요.", url)
+                else confirmDownload(urls, "번호 이어 찾기")
+            }
+        }.start()
+    }
+
     private fun confirmDownload(urls: List<String>, how: String) {
+        failBox?.visibility = View.GONE
         setStatus("$how 으로 이미지 ${urls.size}개를 찾았어요", indeterminate = false)
         AlertDialog.Builder(a)
             .setTitle("이미지 ${urls.size}개")
@@ -211,46 +374,70 @@ class Grabber(private val a: MainActivity) {
 
     // ================= 2) 번호 이어 찾기 =================
 
-    /** 파일 이름의 마지막 숫자를 앞뒤로 바꿔 가며 실제로 있는 이미지를 찾는다 */
-    private fun sequence(url: String): List<String> {
-        val u = URI(url)
-        val path = u.rawPath ?: return listOf(url)
-        val slash = path.lastIndexOf('/')
-        val name = path.substring(slash + 1)
-        val m = Regex("(\\d+)(?!.*\\d)").find(name) ?: return listOf(url)
-        val numStr = m.value
+    private val exts = listOf("jpg", "jpeg", "png", "webp", "gif")
+    private val extRe = Regex("\\.(jpe?g|png|webp|gif|bmp)$", RegexOption.IGNORE_CASE)
+
+    private fun withExt(u: String, ext: String): String {
+        val q = u.indexOf('?')
+        val path = if (q >= 0) u.substring(0, q) else u
+        val rest = if (q >= 0) u.substring(q) else ""
+        return if (extRe.containsMatchIn(path)) path.replace(extRe, ".$ext") + rest else u
+    }
+
+    /**
+     * 주소의 run 위치 숫자를 앞뒤로 바꿔 가며 실제로 있는 이미지를 찾는다.
+     * 6개씩 동시에 확인해서 빠르게, 빈 번호가 maxMiss개 이어지면 멈춤.
+     */
+    private fun sequence(url: String, run: Run, maxMiss: Int, tryExts: Boolean, strip: Boolean): List<String> {
+        val numStr = url.substring(run.start, run.end)
         val width = numStr.length
         val padded = numStr.startsWith("0") && width > 1
         val start = numStr.toLong()
-        val prefix = path.substring(0, slash + 1) + name.substring(0, m.range.first)
-        val suffix = name.substring(m.range.last + 1)
-        val host = URI(u.scheme, u.rawAuthority, null, null, null).toString().removeSuffix("/")
-        val query = u.rawQuery?.let { "?$it" } ?: ""
+        val q = url.indexOf('?')
+        val cutQuery = strip && q >= 0 && run.start < q
         fun make(n: Long): String {
-            val s = if (padded) n.toString().padStart(width, '0') else n.toString()
-            return host + prefix + s + suffix + query
+            val ns = if (padded) n.toString().padStart(width, '0') else n.toString()
+            val u = url.substring(0, run.start) + ns + url.substring(run.end)
+            return if (cutQuery) u.substring(0, u.indexOf('?')) else u
+        }
+        var preferredExt: String? = null
+        fun probe(n: Long): String? {
+            val base = make(n)
+            if (exists(base)) return base
+            if (!tryExts) return null
+            val order = (listOfNotNull(preferredExt) + exts).distinct()
+            for (e in order) {
+                val c = withExt(base, e)
+                if (c != base && exists(c)) { preferredExt = e; return c }
+            }
+            return null
         }
 
-        val before = mutableListOf<String>()
-        val after = mutableListOf<String>()
+        // 기준 이미지 자체 (원본 찾기를 켰는데 원본이 없으면 그대로 사용)
+        val self = probe(start) ?: url
+        val found = java.util.TreeMap<Long, String>()
+        found[start] = self
         val checked = AtomicInteger(0)
-        fun scan(step: Int, into: MutableList<String>) {
+        fun scan(step: Int) {
             var n = start + step
             var miss = 0
-            while (!canceled && n >= 0 && miss < 5 && into.size < 3000) {
-                val candidate = make(n)
-                if (exists(candidate)) {
-                    into.add(candidate)
-                    miss = 0
-                } else miss++
-                n += step
-                val c = checked.incrementAndGet()
-                if (c % 5 == 0) main.post { setStatus("번호로 이어 찾는 중… ${before.size + after.size + 1}개 찾음", indeterminate = true) }
+            while (!canceled && miss < maxMiss && n >= 0 && found.size < 5000) {
+                val batch = (0 until 6).map { n + it * step }.filter { it >= 0 }
+                if (batch.isEmpty()) break
+                val futures = batch.map { k -> pool.submit<String?> { if (canceled) null else probe(k) } }
+                for ((i, f) in futures.withIndex()) {
+                    val hit = try { f.get() } catch (e: Exception) { null }
+                    if (hit != null) { found[batch[i]] = hit; miss = 0 } else miss++
+                    if (miss >= maxMiss) break
+                }
+                n += 6L * step
+                val c = checked.addAndGet(batch.size)
+                main.post { setStatus("번호로 이어 찾는 중… ${found.size}개 찾음 (${c}번 확인)", indeterminate = true) }
             }
         }
-        scan(-1, before)
-        scan(+1, after)
-        return before.reversed() + url + after
+        scan(-1)
+        scan(+1)
+        return found.values.toList()
     }
 
     private fun exists(url: String): Boolean {
@@ -374,6 +561,13 @@ class Grabber(private val a: MainActivity) {
             clipToPadding = false
         }
         box.addView(grid, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        failBox = LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(a.dp(18), a.dp(8), a.dp(18), a.dp(14))
+            visibility = View.GONE
+        }
+        box.addView(failBox)
 
         // 아래: 전체 선택 / ZIP / 낱개 저장
         val act = LinearLayout(a).apply {
@@ -515,6 +709,7 @@ class Grabber(private val a: MainActivity) {
         root?.let { a.frame.removeView(it) }
         root = null
         grid = null
+        failBox = null
         pics.clear()
         cache.evictAll()
         val d = dir

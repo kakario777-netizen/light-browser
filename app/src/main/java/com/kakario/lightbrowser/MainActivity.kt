@@ -100,6 +100,9 @@ class MainActivity : Activity() {
     private lateinit var switcher: TabSwitcher
     private lateinit var pages: Pages
     private lateinit var grabber: Grabber
+    private lateinit var collector: Collector
+    private var lastTouchX = 0f
+    private var lastTouchY = 0f
 
     private var loading = false
     private var customView: View? = null
@@ -130,6 +133,7 @@ class MainActivity : Activity() {
         switcher = TabSwitcher(this)
         pages = Pages(this)
         grabber = Grabber(this)
+        collector = Collector(this)
 
         val (urls, idx) = store.loadSession()
         if (urls.isEmpty()) {
@@ -722,6 +726,7 @@ class MainActivity : Activity() {
     override fun onBackPressed() {
         when {
             customView != null -> exitFullscreen()
+            collector.back() -> {}
             grabber.back() -> {}
             pages.back() -> {}
             switcher.isOpen -> switcher.close()
@@ -760,6 +765,10 @@ class MainActivity : Activity() {
     // ================= 길게 누르기 메뉴 =================
 
     private fun onWebLongPress(wv: WebView): Boolean {
+        if (collector.waitingForPoint) {
+            collector.setPoint(lastTouchX, lastTouchY)
+            return true
+        }
         val hr = wv.hitTestResult
         val type = hr.type
         val extra = hr.extra
@@ -792,6 +801,7 @@ class MainActivity : Activity() {
             items.add("이미지 저장" to { saveImage(wv, img) })
             if (img.startsWith("http")) {
                 items.add("이 이미지 폴더 전체 받기" to { grabber.start(img, wv.url, wv.settings.userAgentString) })
+                items.add("주소 분석해서 찾기" to { grabber.analyze(img, wv.url, wv.settings.userAgentString) })
                 items.add("이미지를 새 탭에서 보기" to { openInBackground(img, findTab(wv)) })
             }
         }
@@ -981,6 +991,10 @@ class MainActivity : Activity() {
         setDownloadListener { url, ua, cd, mime, _ -> onDownloadRequest(this, url, ua, cd, mime) }
         setOnLongClickListener { onWebLongPress(this) }
         setOnTouchListener { _, e ->
+            if (e.actionMasked == MotionEvent.ACTION_DOWN) {
+                lastTouchX = e.x
+                lastTouchY = e.y
+            }
             if (e.actionMasked == MotionEvent.ACTION_DOWN && snackDismissOnTouch) hideSnack()
             false
         }
@@ -1472,6 +1486,7 @@ class MainActivity : Activity() {
         m.add(0, 5, 0, "페이지 공유")
         m.add(0, 6, 0, "데스크톱 모드").apply { isCheckable = true; isChecked = t.desktop }
         m.add(0, 11, 0, "이미지 폴더 받기")
+        m.add(0, 12, 0, "페이지 넘기며 이미지 모으기")
         m.add(0, 9, 0, "설정")
         pm.setOnMenuItemClickListener { item ->
             when (item.itemId) {
@@ -1485,10 +1500,22 @@ class MainActivity : Activity() {
                 6 -> setDesktop(t, !t.desktop)
                 9 -> pages.openSettings()
                 11 -> grabFromPage(t)
+                12 -> startCollector()
             }
             true
         }
         pm.show()
+    }
+
+    fun currentWebView(): WebView? = tabs.getOrNull(cur)?.takeIf { !it.home }?.webView
+
+    fun startCollector() {
+        closeOverlays()
+        collector.begin()
+    }
+
+    fun openGrabberWith(urls: List<String>, page: String?, ua: String?, name: String) {
+        grabber.startWithUrls(urls, page, ua, name)
     }
 
     /** 지금 페이지에서 가장 크게 보이는 이미지를 기준으로 폴더 받기 */

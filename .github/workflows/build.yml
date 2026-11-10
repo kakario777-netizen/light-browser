@@ -55,5 +55,5 @@ jobs:
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest light-browser.apk \
             --title "최신 빌드 #${{ github.run_number }}" \
-            --notes "커밋: ${{ github.sha }} — 폰에서 light-browser.apk를 눌러 받아 설치하세요." \
+            --notes "$(printf '폰에서 light-browser.apk를 눌러 받아 설치하세요.\n\n변경 내용:\n%s' "$(git log -1 --pretty=%B | grep -v -e '^Co-Authored-By' -e '^Claude-Session')")" \
             --target ${{ github.sha }}

@@ -216,6 +216,7 @@ class MainActivity : Activity() {
         private set
 
     private lateinit var parking: FrameLayout
+    lateinit var updater: Updater
 
     /**
      * 지금 보는 탭이 아닌데 넘기며 모으는 중인 페이지는 화면 뒤(parking)에 붙여 둔다.
@@ -301,6 +302,7 @@ class MainActivity : Activity() {
         onJobsChanged()
         if (::grabber.isInitialized) frame.post { askPendingZips() }
         tabs.getOrNull(cur)?.let { if (!it.home) it.webView.onResume() }
+        if (::updater.isInitialized) updater.onResume()
     }
 
     override fun onDestroy() {
@@ -523,6 +525,8 @@ class MainActivity : Activity() {
         root.addView(bottom)
         // 다른 탭에서 넘기며 모으는 페이지를 붙여 두는 곳 (화면 뒤에 가려져 있지만 웹 엔진은 '보이는 중'으로 다룸)
         parking = FrameLayout(this)
+        updater = Updater(this)
+        frame.postDelayed({ updater.autoCheck() }, 3000)
         frame.addView(parking, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         frame.addView(root, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         setContentView(frame)
@@ -1013,6 +1017,11 @@ class MainActivity : Activity() {
             items.add("링크 복사" to { copy(link) })
             items.add("링크 공유" to { share(link) })
         }
+        // 누른 자리의 글 복사 (링크 글자, 또는 그 문단)
+        val tx = lastTouchX
+        val ty = lastTouchY
+        if (link != null) items.add("링크 글자 복사" to { textAt(wv, tx, ty, link = true) })
+        items.add("이 부분 글 복사" to { textAt(wv, tx, ty, link = false) })
         if (img != null) {
             items.add("이미지 저장" to { saveImage(wv, img) })
             if (img.startsWith("http")) {
@@ -1026,6 +1035,47 @@ class MainActivity : Activity() {
             .setItems(items.map { it.first }.toTypedArray()) { _, w -> items[w].second() }
             .show()
     }
+
+    /**
+     * 누른 자리의 글을 읽어 와서 보여주고 복사 (원하는 부분만 골라 복사할 수도 있음).
+     * link면 링크 글자만, 아니면 그 문단·목록 한 줄 정도.
+     */
+    private fun textAt(wv: WebView, x: Float, y: Float, link: Boolean) {
+        val js = "(function(X,Y,VW,VH,L){var e=document.elementFromPoint(X*innerWidth/VW,Y*innerHeight/VH);if(!e)return '';" +
+            "var t=L?(e.closest('a')||e):e;" +
+            "if(!L){while(t.parentElement&&(t.innerText||'').trim().length<20&&t.tagName!='BODY')t=t.parentElement;" +
+            "var b=t.closest('p,li,td,th,blockquote,article,h1,h2,h3,h4,dd,dt,pre');if(b&&(b.innerText||'').length<4000)t=b;}" +
+            "return (t.innerText||t.textContent||'').trim().slice(0,5000);})(" +
+            x + "," + y + "," + wv.width.coerceAtLeast(1) + "," + wv.height.coerceAtLeast(1) + "," + link + ")"
+        wv.evaluateJavascript(js) { res ->
+            val text = try { org.json.JSONTokener(res).nextValue() as? String } catch (e: Exception) { null }
+            if (text.isNullOrBlank()) {
+                toast("여기서는 글을 찾지 못했어요")
+                return@evaluateJavascript
+            }
+            val et = EditText(this).apply {
+                setText(text)
+                textSize = 15f
+                setTextIsSelectable(true)
+                background = null
+                setPadding(dp(20), dp(8), dp(20), dp(8))
+            }
+            AlertDialog.Builder(this)
+                .setTitle("글 복사 (골라서 복사하려면 꾸욱 눌러 선택)")
+                .setView(ScrollView(this).apply { addView(et) })
+                .setPositiveButton("전체 복사") { _, _ -> copy(text) }
+                .setNegativeButton("닫기", null)
+                .show()
+        }
+    }
+
+    /** 복사·선택을 막은 사이트도 글을 꾸욱 눌러 선택할 수 있게 */
+    private val allowSelectJs = "(function(){try{if(document.getElementById('__lb_sel'))return;" +
+        "var s=document.createElement('style');s.id='__lb_sel';" +
+        "s.textContent='body,body *:not(input):not(textarea){-webkit-user-select:text!important;user-select:text!important}';" +
+        "(document.head||document.documentElement).appendChild(s);" +
+        "['selectstart','copy','cut'].forEach(function(n){window.addEventListener(n,function(ev){ev.stopImmediatePropagation();},true);});" +
+        "}catch(e){}})();"
 
     private fun copy(s: String) {
         (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("link", s))
@@ -1265,6 +1315,7 @@ class MainActivity : Activity() {
                 updateUi()
             }
             if (adblock) view.evaluateJavascript(AdBlock.hideScript(Uri.parse(url ?: "").host), null)
+            view.evaluateJavascript(allowSelectJs, null)
             if (url != null && url.startsWith("http") && !AdBlock.blockedUrl(url)) {
                 store.addHistory(view.title ?: url, url)
                 if (::live.isInitialized) live.onPageChanged(view)
@@ -1891,7 +1942,7 @@ class MainActivity : Activity() {
         val url = wv.url
         if (t.home || url == null) { toast("이미지가 있는 페이지에서 써 주세요"); return }
         if (Regex("\\.(jpe?g|png|gif|webp|bmp|avif)(\\?|$)", RegexOption.IGNORE_CASE).containsMatchIn(url)) {
-            grabber.start(url, null, wv.settings.userAgentString)
+            grabber.start(url, null, wv.settings.userAgentString, wv.title)
             return
         }
         val js = "(function(){var b=null,ba=0;document.querySelectorAll('img').forEach(function(i){" +
@@ -1900,7 +1951,7 @@ class MainActivity : Activity() {
         wv.evaluateJavascript(js) { res ->
             val img = try { org.json.JSONTokener(res).nextValue() as? String } catch (e: Exception) { null }
             if (img.isNullOrBlank()) toast("이 페이지에서 이미지를 찾지 못했어요. 이미지를 꾸욱 눌러서 해 보세요")
-            else grabber.start(img, url, wv.settings.userAgentString)
+            else grabber.start(img, url, wv.settings.userAgentString, wv.title)
         }
     }
 

@@ -223,6 +223,10 @@ class Pages(private val a: MainActivity) {
         section(body, "기록")
         row(body, "방문 기록", null, null) { a.showHistory() }
 
+        section(body, "앱 정보")
+        row(body, "업데이트 확인", "지금 빌드 ${a.updater.myBuild()}", null) { a.updater.check(silent = false) }
+        switchRow(body, "자동으로 업데이트 확인", "앱을 켤 때 새 버전이 있으면 알려줘요", st.autoUpdate) { st.autoUpdate = it }
+
         section(body, "그 밖에")
         row(body, "자세한 설정", "실시간 만화 번역 모델 고르기·받기", null) { openAdvanced() }
     }

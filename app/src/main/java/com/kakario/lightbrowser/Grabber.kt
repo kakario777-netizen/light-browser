@@ -84,12 +84,13 @@ class Grabber(private val a: MainActivity) {
 
     // ================= 시작 =================
 
-    fun start(imageUrl: String, pageUrl: String?, userAgent: String?) {
+    fun start(imageUrl: String, pageUrl: String?, userAgent: String?, pageTitle: String? = null) {
         if (!imageUrl.startsWith("http")) {
             a.toastMsg("이 이미지는 서버 주소가 없어서 폴더를 찾을 수 없어요. '넘기며 모으기'를 써 보세요")
             return
         }
         val j = JobStore.create(JobStore.folderName(JobStore.folderOf(imageUrl)), pageUrl, userAgent)
+        j.pageTitle = pageTitle
         openJob(j)
         JobStore.findFolder(j, imageUrl)
     }
@@ -735,8 +736,68 @@ class Grabber(private val a: MainActivity) {
         zip(j, list, deleteAfter)
     }
 
+    private val hangul = Regex("[가-힣]")
+    private val LONG_NAME = 50
+
+    /**
+     * 압축 파일 이름 고르기: 페이지 제목 → 작업 이름 순으로, 한국어가 있는 쪽을 우선.
+     * "원피스 1화 - One Piece | 사이트"처럼 나뉘어 있으면 한국어가 많은 부분을 고름. 자르지 않고 전체 이름.
+     */
+    private fun niceName(j: GrabJob): String {
+        fun best(s: String): String {
+            val parts = s.split(Regex("\\s+[-–—|:·•]\\s+|\\s*[|｜]\\s*|\\s+::\\s+")).map { it.trim() }.filter { it.isNotEmpty() }
+            val kor = parts.filter { hangul.containsMatchIn(it) }
+            return (kor.maxByOrNull { p -> hangul.findAll(p).count() } ?: parts.firstOrNull() ?: s).trim()
+        }
+        val named = listOfNotNull(j.pageTitle, j.title).filter { it.isNotBlank() }.map { best(it) }
+        val pick = named.firstOrNull { hangul.containsMatchIn(it) } ?: named.firstOrNull() ?: "images"
+        return clean(pick)
+    }
+
+    private fun clean(s: String) = s.replace(Regex("[\\\\/:*?\"<>|\\n\\r\\t]"), "_")
+        .replace(Regex("\\s+"), " ").trim().trimEnd('.').ifBlank { "images" }
+
+    /** 이름이 길면(50자 넘음) 고칠 수 있게 물어봄. 앱을 안 보고 있으면 다음에 열 때 물어봄 */
+    private fun ensureName(j: GrabJob, then: (String) -> Unit) {
+        val n = j.zipName ?: niceName(j)
+        if (n.length <= LONG_NAME) {
+            then(n)
+            return
+        }
+        if (!a.isShown) {
+            j.askZip = true
+            j.addLog("압축 파일 이름이 길어서(${n.length}자) 앱을 열 때 확인할게요")
+            return
+        }
+        val et = android.widget.EditText(a).apply {
+            setText(n)
+            setSelection(n.length)
+            textSize = 15f
+        }
+        val box = LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(a.dp(20), a.dp(4), a.dp(20), 0)
+            addView(et)
+        }
+        AlertDialog.Builder(a)
+            .setTitle("파일 이름이 길어요 (${n.length}자)")
+            .setMessage("이대로 저장하거나, 고쳐서 저장할 수 있어요.")
+            .setView(box)
+            .setPositiveButton("저장") { _, _ ->
+                val v = clean(et.text.toString())
+                j.zipName = v
+                then(v)
+            }
+            .setNegativeButton("취소", null)
+            .show()
+    }
+
     private fun zip(j: GrabJob, list: List<GrabJob.Pic>, deleteAfter: Boolean) {
-        val name = j.title.replace(Regex("[\\\\/:*?\"<>|]"), "_").ifBlank { "images" } + ".zip"
+        ensureName(j) { base -> doZip(j, list, deleteAfter, base) }
+    }
+
+    private fun doZip(j: GrabJob, list: List<GrabJob.Pic>, deleteAfter: Boolean, base: String) {
+        val name = "$base.zip"
         val total = list.sumOf { it.file.length() }
         Downloads.saveWith(a, name, "application/zip", total, { out, progress ->
             var n = 0L

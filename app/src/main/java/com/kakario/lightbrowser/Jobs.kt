@@ -28,6 +28,8 @@ class GrabJob(val id: Long, var title: String, val dir: File, val referer: Strin
     var baseImage: String? = null   // 기준 이미지 (못 찾았을 때 주소 분석용)
     var seen = false                // 완료 후 사용자가 열어 봤는지
     var askZip = false              // 앱을 다시 열면 '압축할까요?' 물어보기
+    var pageTitle: String? = null   // 받은 페이지 제목 (압축 파일 이름에 씀)
+    var zipName: String? = null     // 사용자가 정한 압축 파일 이름
     val pics = mutableListOf<Pic>() // 메인 스레드에서만
     internal val slots = ArrayList<Pic?>()          // 메인 스레드에서만 (주소 순서대로)
     internal val failed = sortedSetOf<Int>()        // 실패한 순번 (메인 스레드)

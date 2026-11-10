@@ -55,7 +55,7 @@ class Collector(private val a: MainActivity) {
         var text = ""
         var grab: GrabJob? = null
 
-        fun title() = (wv.title?.takeIf { it.isNotBlank() } ?: Uri.parse(startPage ?: "").host ?: "images").take(40)
+        fun title() = (wv.title?.takeIf { it.isNotBlank() } ?: Uri.parse(startPage ?: "").host ?: "images").trim()
 
         val loop = Runnable { step(this) }
     }
@@ -162,6 +162,7 @@ class Collector(private val a: MainActivity) {
         // 받기 작업을 먼저 만들고, 지금까지 찾은 이미지부터 바로 받기
         val g = JobStore.startCollecting(j.title(), j.startPage, j.wv.settings.userAgentString)
         j.grab = g
+        g.pageTitle = j.wv.title
         grabByView[System.identityHashCode(j.wv)] = g
         g.addLog("모으기 시작 · " + (if (autoTap) "자동으로 넘김 (누르는 자리 ${j.tapX.toInt()},${j.tapY.toInt()})" else "직접 넘김") +
             " · 페이지 ${j.wv.url}")

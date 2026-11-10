@@ -93,6 +93,17 @@ class Store(ctx: Context) {
         get() = p.getInt("textZoom", 100)
         set(v) = p.edit().putInt("textZoom", v).apply()
 
+    /** 앱을 켤 때 새 버전 자동 확인 */
+    var autoUpdate: Boolean
+        get() = p.getBoolean("autoUpdate", true)
+        set(v) = p.edit().putBoolean("autoUpdate", v).apply()
+    var lastUpdateCheck: Long
+        get() = p.getLong("lastUpdateCheck", 0L)
+        set(v) = p.edit().putLong("lastUpdateCheck", v).apply()
+    var skipBuild: Int
+        get() = p.getInt("skipBuild", 0)
+        set(v) = p.edit().putInt("skipBuild", v).apply()
+
     /** 받기가 다 끝났을 때(실패 없음): 0 = 물어보기, 1 = 자동 압축 후 이미지 삭제, 2 = 그냥 두기 */
     var autoZip: Int
         get() = p.getInt("autoZip", 0)

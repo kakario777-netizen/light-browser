@@ -40,7 +40,11 @@ import java.util.zip.ZipOutputStream
  */
 class Grabber(private val a: MainActivity) {
     private val main = Handler(Looper.getMainLooper())
-    private val thumbPool = Executors.newFixedThreadPool(2)
+    // 미리보기 만들기: 방금 화면에 나온 칸부터(나중에 들어온 걸 먼저) 4개씩 동시에
+    private val thumbPool = java.util.concurrent.ThreadPoolExecutor(4, 4, 0L, java.util.concurrent.TimeUnit.MILLISECONDS,
+        object : java.util.concurrent.LinkedBlockingDeque<Runnable>() {
+            override fun offer(e: Runnable) = offerFirst(e)
+        })
 
     // 작업 보기 화면
     private var root: View? = null
@@ -984,8 +988,11 @@ class Grabber(private val a: MainActivity) {
             val cached = cache.get(key)
             if (cached != null) img.setImageBitmap(cached) else {
                 img.setImageDrawable(null)
+                val size = (w / 2).coerceIn(120, 260)
                 thumbPool.execute {
-                    val b = decode(p.file, 300) ?: return@execute
+                    // 이미 화면 밖으로 지나간 칸이면 건너뜀 (빠르게 넘길 때 밀리지 않게)
+                    if (img.tag != key) return@execute
+                    val b = decode(p.file, size) ?: return@execute
                     cache.put(key, b)
                     main.post { if (img.tag == key) img.setImageBitmap(b) }
                 }

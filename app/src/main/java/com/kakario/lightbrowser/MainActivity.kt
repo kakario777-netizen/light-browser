@@ -262,6 +262,7 @@ class MainActivity : Activity() {
 
     override fun onStop() {
         super.onStop()
+        if (::collector.isInitialized) collector.saveAll()
         // 넘기며 모으는 중이면 페이지를 미니 창으로 옮겨서 계속 움직이게 함
         if (::collector.isInitialized && collector.hasJobs() && mini.canUse()) {
             val labels = collector.miniLabels()
@@ -527,6 +528,7 @@ class MainActivity : Activity() {
         parking = FrameLayout(this)
         updater = Updater(this)
         frame.postDelayed({ updater.autoCheck() }, 3000)
+        frame.postDelayed({ if (::collector.isInitialized) collector.askSavedOnStart() }, 1500)
         frame.addView(parking, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         frame.addView(root, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         setContentView(frame)
@@ -870,7 +872,7 @@ class MainActivity : Activity() {
     private fun pageClearlyVisible() = isShown && !switcher.isOpen && !pages.isOpen && !grabber.isOpen &&
         !(::history.isInitialized && history.isOpen)
 
-    private fun closeOverlays() {
+    fun closeOverlays() {
         if (switcher.isOpen) switcher.close()
         pages.closeAll()
         if (::grabber.isInitialized) {
@@ -1770,7 +1772,7 @@ class MainActivity : Activity() {
                 6 -> setDesktop(t, !t.desktop)
                 9 -> pages.openSettings()
                 11 -> grabFromPage(t)
-                12 -> startCollector()
+                12 -> { closeOverlays(); collector.beginOrResume() }
                 13 -> live.toggle()
             }
             true

@@ -39,6 +39,10 @@ class GrabJob(val id: Long, var title: String, val dir: File, val referer: Strin
     /** 페이지가 이미지를 불러올 때 앱이 같이 받아 둔 파일 (다시 요청하지 않고 그대로 씀) */
     val captured = java.util.concurrent.ConcurrentHashMap<String, File>()
     internal val failReason = HashMap<Int, Int>()   // 순번별 실패 이유 (메인 스레드)
+    /** 받은 이미지 내용 지문 (같은 그림을 두 번 받지 않게) (메인 스레드) */
+    internal val hashes = HashMap<String, Int>()   // 지문 → 순번
+    internal val dupSlots = sortedSetOf<Int>()      // 이미 받은 것과 같아서 건너뛴 순번
+    val dups get() = dupSlots.size
     /** 작업 기록 (넘기기·실패 상세). 여러 스레드에서 씀 */
     val log = StringBuffer()
 
@@ -104,6 +108,8 @@ object JobStore {
     var onFound: ((GrabJob) -> Unit)? = null
     /** 받기가 끝났을 때 (앱 안 완료 표시) */
     var onFinished: ((GrabJob) -> Unit)? = null
+    /** 받고 보니 이미 받은 그림과 같을 때 (넘기며 모으기가 '안 넘어간 것'으로 다시 판단) */
+    var onDuplicate: ((GrabJob, Int) -> Unit)? = null
 
     fun init(ctx: Context) {
         if (!::app.isInitialized) app = ctx.applicationContext
@@ -138,7 +144,7 @@ object JobStore {
 
     fun create(title: String, referer: String?, ua: String?): GrabJob {
         val id = System.currentTimeMillis() + jobs.size
-        val j = GrabJob(id, title, File(app.cacheDir, "grab/$id").apply { mkdirs() }, referer, ua)
+        val j = GrabJob(id, title, File(app.filesDir, "grab/$id").apply { mkdirs() }, referer, ua)
         jobs.add(0, j)
         changed(j, true)
         return j
@@ -432,6 +438,64 @@ object JobStore {
         j.failCodes.clear()
         j.failReason.clear()
         j.pics.clear()
+        j.hashes.clear()
+        j.dupSlots.clear()
+    }
+
+    /** 저장해 둔 넘기며 모으기를 다시 불러옴 (받던 폴더 그대로, 못 받은 건 다시 받음) */
+    fun restore(s: CollectSaves.Save): GrabJob? {
+        val o = s.o
+        get(s.id)?.let { return it }
+        val dir = File(o.optString("dir"))
+        if (!dir.exists()) return null
+        val j = GrabJob(s.id, o.optString("title"), dir, o.optString("referer").ifEmpty { null }, o.optString("ua").ifEmpty { null })
+        j.how = "넘기며 모으기"
+        j.pageTitle = o.optString("pageTitle").ifEmpty { null }
+        j.zipName = o.optString("zipName").ifEmpty { null }
+        val urls = ArrayList<String>()
+        o.optJSONArray("urls")?.let { a -> for (i in 0 until a.length()) urls.add(a.getString(i)) }
+        j.urls = urls
+        urls.forEach { _ -> j.slots.add(null) }
+        o.optJSONArray("ok")?.let { a ->
+            for (k in 0 until a.length()) {
+                val e = a.getJSONObject(k)
+                val i = e.getInt("i")
+                val f = File(dir, e.getString("f"))
+                if (i < j.slots.size && f.exists() && f.length() > 0) j.slots[i] = GrabJob.Pic(urls[i], f)
+            }
+        }
+        o.optJSONObject("failed")?.let { f ->
+            f.keys().forEach { k ->
+                val i = k.toIntOrNull() ?: return@forEach
+                if (i < j.slots.size && j.slots[i] == null) {
+                    val code = f.optInt(k, -1)
+                    j.failed.add(i)
+                    j.failReason[i] = code
+                    j.failCodes[code] = (j.failCodes[code] ?: 0) + 1
+                }
+            }
+        }
+        o.optJSONArray("dups")?.let { a -> for (k in 0 until a.length()) j.dupSlots.add(a.getInt(k)) }
+        o.optJSONObject("hashes")?.let { h -> h.keys().forEach { k -> j.hashes[k] = h.optInt(k) } }
+        j.slots.forEach { p -> if (p != null) j.pics.add(p) }
+        j.total = j.slots.size
+        j.fails = j.failed.size
+        j.state = GrabJob.COLLECTING
+        val missing = j.slots.indices.filter { j.slots[it] == null && it !in j.failed && it !in j.dupSlots }
+        j.done = j.total - missing.size
+        j.addLog("저장해 둔 작업 다시 불러옴 · 받은 ${j.pics.size}장 · 다시 받을 ${missing.size}장")
+        updateStatus(j)
+        jobs.add(0, j)
+        missing.forEach { i -> fetch(j, i, urls[i], attempt = 1) }
+        changed(j, true)
+        return j
+    }
+
+    /** 저장하고 그만: 받던 걸 멈추고 목록에서 빼되, 받은 파일은 남겨 둔다 */
+    fun detach(j: GrabJob) {
+        j.canceled = true
+        jobs.remove(j)
+        changed(null, true)
     }
 
     /** 이미지 하나 추가하고 바로 받기 시작 (메인 스레드) */
@@ -606,6 +670,20 @@ object JobStore {
     private fun fetched(j: GrabJob, i: Int, url: String, f: File, ok: Boolean, code: Int) {
         if (j.canceled || i >= j.slots.size) return
         if (ok) {
+            val h = hashOf(f)
+            val same = h?.let { j.hashes[it] }
+            if (same != null && same != i) {
+                // 주소는 달라도 이미 받은 그림과 똑같음 → 지우고 건너뜀 (넘기기가 실제로 안 됐을 수 있음)
+                f.delete()
+                j.dupSlots.add(i)
+                j.addLog("${i + 1}번은 ${same + 1}번과 똑같은 그림이라 건너뜀 (주소만 다름)\n          $url")
+                onDuplicate?.invoke(j, i)
+                j.done++
+                updateStatus(j)
+                if (j.state != GrabJob.COLLECTING && j.done >= j.total) finish(j) else changed(j)
+                return
+            }
+            if (h != null) j.hashes[h] = i
             j.slots[i] = GrabJob.Pic(url, f)
             j.pics.clear()
             j.slots.forEach { p -> if (p != null) j.pics.add(p) }
@@ -620,6 +698,19 @@ object JobStore {
         updateStatus(j)
         if (j.state != GrabJob.COLLECTING && j.done >= j.total) finish(j) else changed(j)
     }
+
+    private fun hashOf(f: File): String? = try {
+        val md = java.security.MessageDigest.getInstance("MD5")
+        f.inputStream().use { ins ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = ins.read(buf)
+                if (n < 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        md.digest().joinToString("") { "%02x".format(it) } + ":" + f.length()
+    } catch (e: Exception) { null }
 
     /** 실패한 이미지 목록: (순번, 주소, 실패 코드) */
     fun failList(j: GrabJob): List<Triple<Int, String, Int>> =
@@ -675,13 +766,13 @@ object JobStore {
 
     private fun updateStatus(j: GrabJob) {
         val head = if (j.state == GrabJob.COLLECTING) "모으면서 받는 중…" else "받는 중…"
-        j.status = "$head ${j.done} / ${j.total}" + if (j.fails > 0) " (실패 ${j.fails}: ${j.failSummary()})" else ""
+        j.status = "$head ${j.done} / ${j.total}" + (if (j.dups > 0) " · 중복 ${j.dups} 건너뜀" else "") + if (j.fails > 0) " (실패 ${j.fails}: ${j.failSummary()})" else ""
     }
 
     private fun finish(j: GrabJob) {
         j.state = GrabJob.DONE
         val size = j.pics.sumOf { it.file.length() }
-        j.status = "${j.pics.size}개 받음 · ${Downloads.size(size)}" + if (j.fails > 0) " · 실패 ${j.fails} (${j.failSummary()})" else ""
+        j.status = "${j.pics.size}개 받음 · ${Downloads.size(size)}" + (if (j.dups > 0) " · 중복 ${j.dups} 건너뜀" else "") + if (j.fails > 0) " · 실패 ${j.fails} (${j.failSummary()})" else ""
         changed(j, true)
         BgWork.jobDone(app, j)
         onFinished?.invoke(j)

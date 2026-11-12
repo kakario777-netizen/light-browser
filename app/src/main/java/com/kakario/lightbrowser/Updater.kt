@@ -197,6 +197,7 @@ class Updater(private val a: MainActivity) {
                 params.setRequireUserAction(android.content.pm.PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
             }
             params.setSize(f.length())
+            if (android.os.Build.VERSION.SDK_INT >= 34) params.setRequestUpdateOwnership(true)
             val id = pi.createSession(params)
             pi.openSession(id).use { s ->
                 s.openWrite("base.apk", 0, f.length()).use { out ->

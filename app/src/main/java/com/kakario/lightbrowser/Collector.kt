@@ -721,7 +721,7 @@ class Collector(private val a: MainActivity) {
         if (same != null) {
             val acts = listOf<Pair<String, () -> Unit>>(
                 "여기서부터 이어 받기\n이미 받은 장은 건너뛰고 못 받은 장만 채워요" to { resumeSaved(same, here = true) },
-                "이 페이지부터 새로 받기\n받은 이미지 중 같은 장을 찾아 보여주고, 그 장부터 다시 받아요" to { findHere(same) },
+                "이 페이지부터 새로 받기\n지금 페이지가 몇 번째 장인지 입력하고, 맞춰 본 뒤 그 다음 장부터 다시 받아요" to { findHere(same) },
                 "다른 저장 작업 고르기" to { pickSaved(list, "넘기며 모으기", newOption = true) },
                 "새 작업으로 모으기" to { begin() },
             )
@@ -762,7 +762,7 @@ class Collector(private val a: MainActivity) {
     private fun choose(s: CollectSaves.Save) {
         val acts = ArrayList<Pair<String, () -> Unit>>()
         if (hereOk()) acts.add("지금 보는 페이지부터 이어 받기 (이미 받은 장은 건너뜀)" to { resumeSaved(s, here = true) })
-        if (hereOk()) acts.add("이 페이지부터 새로 받기 (받은 것 중 같은 장을 찾아 확인)" to { findHere(s) })
+        if (hereOk()) acts.add("이 페이지부터 새로 받기 (몇 번째 장인지 입력해서 맞추기)" to { findHere(s) })
         acts.add("저장한 페이지(멈췄던 곳)에서 이어 받기" to { resumeSaved(s, here = false) })
         acts.add("받은 것만 정리 (더 안 넘기고 끝)" to { finishSaved(s) })
         acts.add("버리기" to {
@@ -797,7 +797,36 @@ class Collector(private val a: MainActivity) {
     // ================= 이 페이지부터 새로 받기 =================
 
     /** 지금 화면 그림과 가장 비슷한 '받은 이미지'를 찾아 보여주고 확인 */
+    /** 지금 페이지가 받은 이미지 몇 번인지 직접 입력 → 그 장을 보여주고 맞는지 확인 */
     private fun findHere(s: CollectSaves.Save) {
+        val o = s.o
+        val total = o.optJSONArray("urls")?.length() ?: 0
+        if (total == 0) { a.toastMsg("받은 이미지가 없어요"); return }
+        val et = android.widget.EditText(a).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            hint = "1 ~ $total"
+            setText(total.toString())
+            selectAll()
+        }
+        val box = FrameLayout(a).apply { setPadding(a.dp(24), a.dp(8), a.dp(24), 0); addView(et) }
+        val d = android.app.AlertDialog.Builder(a)
+            .setTitle("지금 페이지가 몇 번째 장인가요?")
+            .setMessage("받은 이미지 1~${total}번 중에서 입력해 주세요. 그 장을 보여드릴게요.")
+            .setView(box)
+            .setPositiveButton("보기") { _, _ ->
+                val n = et.text.toString().trim().toIntOrNull()
+                if (n == null || n < 1) a.toastMsg("번호를 입력해 주세요")
+                else confirmFrom(s, (n - 1).coerceAtMost(total - 1), -1)
+            }
+            .setNegativeButton("취소", null)
+            .create()
+        d.setOnShowListener { et.requestFocus(); d.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE) }
+        d.show()
+    }
+
+    /** (예전: 화면 그림으로 자동 찾기 — 지금은 안 씀) */
+    @Suppress("unused")
+    private fun findHereAuto(s: CollectSaves.Save) {
         val w = a.currentWebView() ?: return
         val js = "(function(){var W=innerWidth,H=innerHeight,b=null,ba=0;" +
             // 그림이 실제로 그려진 칸(빈 여백 빼고)과, 그중 화면에 보이는 부분의 비율까지 구함
@@ -965,8 +994,8 @@ class Collector(private val a: MainActivity) {
         var dlg: android.app.AlertDialog? = null
         fun show() {
             val n = idx[pos]
-            label.text = "받은 이미지 ${n + 1}번" + if (n == start) (if (sim >= 70) " · 지금 화면과 ${sim}% 비슷" else " · 확실하지 않아요, ◀ ▶로 골라 주세요") else ""
-            dlg?.getButton(android.app.AlertDialog.BUTTON_POSITIVE)?.text = "${n + 1}번부터 새로 받기"
+            label.text = "받은 이미지 ${n + 1}번 / ${idx.last() + 1}"
+            dlg?.getButton(android.app.AlertDialog.BUTTON_POSITIVE)?.text = "맞아요 · ${n + 2}번부터 다시 받기"
             img.setImageDrawable(null)
             val f = files[n] ?: return
             Thread {
@@ -983,9 +1012,11 @@ class Collector(private val a: MainActivity) {
         prev.setOnClickListener { if (pos > 0) { pos--; show() } }
         next.setOnClickListener { if (pos < idx.size - 1) { pos++; show() } }
         dlg = android.app.AlertDialog.Builder(a)
-            .setTitle("이 페이지가 이 장 맞나요?")
+            .setTitle("지금 페이지와 같은 장인가요?")
+            .setMessage("아니면 ◀ ▶로 한 장씩 옮겨 맞춰 주세요.")
             .setView(box)
-            .setPositiveButton("새로 받기") { _, _ -> resumeSaved(s, here = true, fromIndex = idx[pos]) }
+            // 지금 페이지 = 이 장 → 이 장까지 두고 그 다음 장부터 지우고 다시 받음
+            .setPositiveButton("다시 받기") { _, _ -> resumeSaved(s, here = true, fromIndex = idx[pos] + 1) }
             .setNegativeButton("취소", null)
             .create()
         dlg.setOnShowListener { show() }
@@ -1032,7 +1063,7 @@ class Collector(private val a: MainActivity) {
         grabByView[System.identityHashCode(wv)] = g
         jobs.add(j)
         g.addLog("이어 받기 · 페이지 $page")
-        j.text = if (fromIndex != null) "${fromIndex + 1}번부터 새로 받아요" else if (here) "이 페이지부터 이어 받아요 · 이미 받은 장은 건너뛰어요" else "멈췄던 페이지를 여는 중… 잠시 뒤 이어서 넘겨요"
+        j.text = if (fromIndex != null) "${fromIndex + 1}번부터 다시 받아요 (지금 페이지 다음 장부터)" else if (here) "이 페이지부터 이어 받아요 · 이미 받은 장은 건너뛰어요" else "멈췄던 페이지를 여는 중… 잠시 뒤 이어서 넘겨요"
         refreshBar()
         report()
         // 페이지가 뜰 시간을 주고 시작

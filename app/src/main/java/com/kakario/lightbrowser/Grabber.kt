@@ -472,7 +472,7 @@ class Grabber(private val a: MainActivity) {
             layoutManager = GridLayoutManager(a, cols).apply {
                 // '몇 장 건너뜀' 줄은 한 줄 전체를 차지
                 spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
-                    override fun getSpanSize(position: Int) = if (adapter.isGap(position)) cols else 1
+                    override fun getSpanSize(position: Int) = if (this@Grabber.adapter.isGap(position)) cols else 1
                 }
             }
             adapter = this@Grabber.adapter

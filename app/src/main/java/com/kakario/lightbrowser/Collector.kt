@@ -65,6 +65,9 @@ class Collector(private val a: MainActivity) {
         val foundNorm = HashSet<String>()   // 주소 꼬리를 뗀 그림 파일 주소
         var lastGrabAt = 0L     // 주소 없는 그림을 마지막으로 꺼낸 때
         var grabbing = false
+        val shot = HashSet<String>()     // 화면을 찍어 둔 그림 주소
+        val shotHashes = ArrayList<Long>()   // 찍은 화면 그림 지문들
+        var sameCheckTap = 0L
         var rewound = false     // 저장한 곳보다 앞에서 이어 받는 중
         var cursor = -1         // 지금 화면이 이미 받은 몇 번째 장인지 (빈 칸 채우기용)
         val saver = Runnable { saveNow(this) }
@@ -333,7 +336,12 @@ class Collector(private val a: MainActivity) {
             "var mx=0;c.forEach(function(x){if(x.a>mx)mx=x.a;});window.__lbG=[];" +
             "c.forEach(function(x){if(x.a<mx*0.5)return;if(/^https?:/.test(x.s))o.push(x.s);" +
             "else if(x.e){window.__lbG.push(x.e);o.push('grab:'+(window.__lbG.length-1)+':'+(x.s.indexOf('data:')==0?'data':x.s));}});" +
-            "o.push('sig:'+location.href+'|'+o.join('|'));return JSON.stringify(o);})()"
+            "o.push('sig:'+location.href+'|'+o.join('|'));" +
+            // 가장 큰 그림의 위치 (화면과 비교용)
+            "var b=null;c.forEach(function(x){if(x.e&&x.e.tagName=='IMG'&&(!b||x.a>b.a))b=x;});" +
+            "if(b){var r=b.e.getBoundingClientRect();o.push('main:'+JSON.stringify({s:b.s,x:r.left,y:r.top,w:r.width,h:r.height,iw:W,ih:H," +
+            "ok:b.e.complete&&b.e.naturalWidth>0}));}" +
+            "return JSON.stringify(o);})()"
         j.wv.evaluateJavascript(js) { res ->
             try {
                 val str = JSONTokener(res).nextValue() as? String
@@ -350,6 +358,8 @@ class Collector(private val a: MainActivity) {
                                 log(j, "새 주소 없이 화면만 바뀜 (${j.sigOnly}번째 연속) · 이미 받은 장이면 건너뜀")
                             }
                             j.lastSig = u
+                        } else if (u.startsWith("main:")) {
+                            shoot(j, u.substring(5))
                         } else if (u.startsWith("grab:")) {
                             grabPixels(j, u)
                         } else if (u.startsWith("http")) {
@@ -379,6 +389,74 @@ class Collector(private val a: MainActivity) {
             }
             after?.invoke()
         }
+    }
+
+    /**
+     * 화면에 실제로 보이는 가장 큰 그림을 찍어서, 받은 파일이 그 그림과 같은지 나중에 비교하게 함.
+     * 앱에서 그 탭을 보고 있을 때만 (화면 밖에서는 찍을 수 없음)
+     */
+    private fun shoot(j: Job, json: String) {
+        val g = j.grab ?: return
+        if (!j.running || !a.isShown || a.currentWebView() !== j.wv) return
+        val o = try { org.json.JSONObject(json) } catch (e: Exception) { return }
+        val src = o.optString("s")
+        if (!src.startsWith("http") || !o.optBoolean("ok") || !j.found.contains(src)) return
+        val already = src in j.shot
+        // 이미 찍은 주소: 넘긴 뒤 한 번만, 주소는 그대로인데 그림만 바뀌었는지 확인
+        if (already && (j.catchingUp || j.lastTapAt == 0L || j.sameCheckTap == j.lastTapAt || j.lastNewAt > j.lastTapAt)) return
+        val iw = o.optDouble("iw", 0.0)
+        val ih = o.optDouble("ih", 0.0)
+        val x = o.optDouble("x"); val y = o.optDouble("y"); val w = o.optDouble("w"); val h = o.optDouble("h")
+        // 그림 전체가 화면 안에 있을 때만 (길게 이어진 웹툰은 비교 안 함)
+        if (iw <= 0 || w < 50 || h < 50 || x < -2 || y < -2 || x + w > iw + 2 || y + h > ih + 2) return
+        if (already) j.sameCheckTap = j.lastTapAt else j.shot.add(src)
+        val tapAt = j.lastTapAt
+        val wv = j.wv
+        val k = wv.width / iw
+        val loc = IntArray(2)
+        wv.getLocationInWindow(loc)
+        val rect = android.graphics.Rect((loc[0] + x * k).toInt(), (loc[1] + y * k).toInt(),
+            (loc[0] + (x + w) * k).toInt(), (loc[1] + (y + h) * k).toInt())
+        if (rect.width() <= 0 || rect.height() <= 0) return
+        // 이미지가 막 바뀐 순간을 피하려고 잠깐 뒤에 찍음
+        main.postDelayed({
+            if (!j.running || a.currentWebView() !== wv || !a.isShown) { if (!already) j.shot.remove(src); return@postDelayed }
+            try {
+                val bmp = android.graphics.Bitmap.createBitmap(rect.width(), rect.height(), android.graphics.Bitmap.Config.ARGB_8888)
+                android.view.PixelCopy.request(a.window, rect, bmp, { res ->
+                    if (res != android.view.PixelCopy.SUCCESS) { bmp.recycle(); if (!already) j.shot.remove(src); return@request }
+                    Thread {
+                        val hash = JobStore.dHash(bmp)
+                        val out = java.io.ByteArrayOutputStream()
+                        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, out)
+                        bmp.recycle()
+                        val jpg = out.toByteArray()
+                        main.post { shotTaken(j, g, src, already, tapAt, hash, jpg) }
+                    }.start()
+                }, main)
+            } catch (e: Throwable) {
+                if (!already) j.shot.remove(src)
+            }
+        }, 350)
+    }
+
+    private fun shotTaken(j: Job, g: GrabJob, src: String, already: Boolean, tapAt: Long, hash: Long, jpg: ByteArray) {
+        val near = j.shotHashes.any { java.lang.Long.bitCount(it xor hash) <= 10 }
+        j.shotHashes.add(hash)
+        if (!already) {
+            // 새 주소의 그림: 받은 파일이 이 화면과 같은지 비교
+            JobStore.expectShot(g, src, hash, jpg)
+            return
+        }
+        // 주소는 그대로인데 화면 그림이 처음 보는 그림 → 새 장으로 화면을 저장
+        if (near || !j.running || j.lastNewAt > tapAt) return
+        j.found.add("screen:$hash")
+        j.lastNewAt = SystemClock.uptimeMillis()
+        j.autoRetries = 0
+        j.sigOnly = 0
+        scheduleSave(j)
+        log(j, "주소는 그대로인데 화면 그림이 바뀜 → 화면을 그대로 저장 (${j.found.size}번째)")
+        JobStore.addBytes(g, jpg, "jpg", fillSlot(j))
     }
 
     /**

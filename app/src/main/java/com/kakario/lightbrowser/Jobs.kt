@@ -43,6 +43,10 @@ class GrabJob(val id: Long, var title: String, val dir: File, val referer: Strin
     internal val hashes = HashMap<String, Int>()   // 지문 → 순번
     internal val dupSlots = sortedSetOf<Int>()      // 이미 받은 것과 같아서 건너뛴 순번
     val dups get() = dupSlots.size
+    internal val dupOf = HashMap<Int, Int>()        // 중복 칸 → 원래 칸
+    /** 화면에 실제로 보였던 그림 (주소 → 그림 지문, 화면 캡처 jpg) — 받은 파일과 비교 */
+    val expect = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, ByteArray>>()
+    internal val fixed = sortedSetOf<Int>()         // 받은 그림이 화면과 달라서 화면 캡처로 바꾼 칸
     /** 작업 기록 (넘기기·실패 상세). 여러 스레드에서 씀 */
     val log = StringBuffer()
 
@@ -440,6 +444,9 @@ object JobStore {
         j.pics.clear()
         j.hashes.clear()
         j.dupSlots.clear()
+        j.dupOf.clear()
+        j.fixed.clear()
+        j.expect.clear()
     }
 
     /** 저장해 둔 넘기며 모으기를 다시 불러옴 (받던 폴더 그대로, 못 받은 건 다시 받음) */
@@ -719,7 +726,9 @@ object JobStore {
                 // 주소는 달라도 이미 받은 그림과 똑같음 → 지우고 건너뜀 (넘기기가 실제로 안 됐을 수 있음)
                 f.delete()
                 j.dupSlots.add(i)
+                j.dupOf[i] = same
                 j.addLog("${i + 1}번은 ${same + 1}번과 똑같은 그림이라 건너뜀 (주소만 다름)\n          $url")
+                if (j.expect.containsKey(url)) checkScreen(j, i, url)
                 onDuplicate?.invoke(j, same)
                 j.done++
                 updateStatus(j)
@@ -731,6 +740,7 @@ object JobStore {
             j.pics.clear()
             j.slots.forEach { p -> if (p != null) j.pics.add(p) }
             j.failReason.remove(i)
+            if (j.expect.containsKey(url)) checkScreen(j, i, url)
         } else {
             j.failed.add(i)
             j.failCodes[code] = (j.failCodes[code] ?: 0) + 1
@@ -741,6 +751,77 @@ object JobStore {
         updateStatus(j)
         if (j.state != GrabJob.COLLECTING && j.done >= j.total) finish(j) else changed(j)
     }
+
+    // ================= 화면과 비교 =================
+
+    /** 넘기며 모으기가 화면에 보인 그림을 찍어 보냄 (아무 스레드) */
+    fun expectShot(j: GrabJob, url: String, hash: Long, jpg: ByteArray) {
+        j.expect[url] = hash to jpg
+        main.post {
+            val i = j.urls.indexOf(url)
+            if (i >= 0 && (j.slots.getOrNull(i) != null || i in j.dupSlots)) checkScreen(j, i, url)
+        }
+    }
+
+    /** 받은 그림(또는 중복이라 버린 그림)을 화면에 보였던 그림과 비교 → 다르면 화면 캡처로 바꿈 (메인 스레드) */
+    private fun checkScreen(j: GrabJob, i: Int, url: String) {
+        val e = j.expect.remove(url) ?: return
+        val dup = i in j.dupSlots
+        val f = if (dup) j.slots.getOrNull(j.dupOf[i] ?: -1)?.file else j.slots.getOrNull(i)?.file
+        if (f == null || !f.exists()) return
+        pool.execute {
+            val h = dHashFile(f) ?: return@execute
+            val dist = java.lang.Long.bitCount(h xor e.first)
+            if (dist <= 14) {
+                if (!dup) j.addLog("${i + 1}번 화면과 같음 확인 (차이 $dist)")
+                return@execute
+            }
+            // 화면에 보였던 그림과 다름 → 화면 캡처를 그 장으로 저장
+            val nf = File(j.dir, (i + 1).toString().padStart(4, '0') + "_screen.jpg")
+            val ok = runCatching { FileOutputStream(nf).use { it.write(e.second) } }.isSuccess
+            main.post {
+                if (!ok || j.canceled || i >= j.slots.size) return@post
+                if (dup) {
+                    j.dupSlots.remove(i)
+                    j.dupOf.remove(i)
+                } else {
+                    j.slots[i]?.file?.let { old -> if (old != nf) old.delete() }
+                }
+                j.slots[i] = GrabJob.Pic(url, nf)
+                j.fixed.add(i)
+                j.pics.clear()
+                j.slots.forEach { p -> if (p != null) j.pics.add(p) }
+                j.addLog("${i + 1}번 받은 그림이 화면과 달라서(차이 $dist) 화면 캡처로 바꿈" +
+                    (if (dup) " · 중복으로 버렸던 장" else "") + "\n          $url")
+                updateStatus(j)
+                changed(j)
+            }
+        }
+    }
+
+    /** 그림 지문(dHash 64비트): 크기·화질이 달라도 같은 그림이면 비슷하게 나옴 */
+    fun dHash(b: android.graphics.Bitmap): Long {
+        val s = android.graphics.Bitmap.createScaledBitmap(b, 9, 8, true)
+        var h = 0L
+        for (y in 0 until 8) for (x in 0 until 8) {
+            val l = gray(s.getPixel(x, y))
+            val r = gray(s.getPixel(x + 1, y))
+            h = (h shl 1) or (if (l > r) 1L else 0L)
+        }
+        if (s !== b) s.recycle()
+        return h
+    }
+
+    private fun gray(c: Int) = ((c shr 16) and 0xff) * 3 + ((c shr 8) and 0xff) * 6 + (c and 0xff)
+
+    private fun dHashFile(f: File): Long? = try {
+        val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(f.path, o)
+        var sample = 1
+        while (o.outWidth / (sample * 2) >= 64 && o.outHeight / (sample * 2) >= 64) sample *= 2
+        val b = android.graphics.BitmapFactory.decodeFile(f.path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+        b?.let { val h = dHash(it); it.recycle(); h }
+    } catch (e: Throwable) { null }
 
     private fun hashOf(f: File): String? = try {
         val md = java.security.MessageDigest.getInstance("MD5")
@@ -809,7 +890,7 @@ object JobStore {
 
     private fun updateStatus(j: GrabJob) {
         val head = if (j.state == GrabJob.COLLECTING) "모으면서 받는 중…" else "받는 중…"
-        j.status = "$head ${j.done} / ${j.total}" + (if (j.dups > 0) " · 중복 ${j.dups} 건너뜀" else "") + if (j.fails > 0) " (실패 ${j.fails}: ${j.failSummary()})" else ""
+        j.status = "$head ${j.done} / ${j.total}" + (if (j.dups > 0) " · 중복 ${j.dups} 건너뜀" else "") + (if (j.fixed.isNotEmpty()) " · 화면으로 고침 ${j.fixed.size}" else "") + if (j.fails > 0) " (실패 ${j.fails}: ${j.failSummary()})" else ""
     }
 
     private fun finish(j: GrabJob) {

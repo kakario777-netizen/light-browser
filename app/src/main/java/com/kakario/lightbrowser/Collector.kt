@@ -49,6 +49,9 @@ class Collector(private val a: MainActivity) {
         var lastNewAt = 0L
         var lastTapAt = 0L
         var failedTaps = 0
+        var lastSig = ""        // 지금 화면(주소+보이는 이미지) — 바뀌면 넘어간 걸로 봄
+        var lastNetAt = 0L      // 페이지가 마지막으로 이미지를 받기 시작한 때
+        var autoRetries = 0     // 멈춘 뒤 스스로 다시 시도한 횟수
         var goodMethod = -1     // 이 사이트에서 통한 넘기기 방법
         var lastMethod = 0
         var pages = 1
@@ -123,6 +126,7 @@ class Collector(private val a: MainActivity) {
         val accept = req.requestHeaders["Accept"] ?: req.requestHeaders["accept"] ?: ""
         if (!accept.contains("image") && !imgPath.containsMatchIn(req.url.path ?: "")) return null
         if (g.headers.size < 8000) g.headers.putIfAbsent(url, HashMap(req.requestHeaders))
+        jobs.firstOrNull { it.grab === g }?.lastNetAt = SystemClock.uptimeMillis()
         if (g.captured.containsKey(url)) return null
         return JobStore.interceptImage(g, url, req.requestHeaders)
     }
@@ -198,7 +202,11 @@ class Collector(private val a: MainActivity) {
             if (!j.running) return@snap
             val now = SystemClock.uptimeMillis()
             if (j.auto) {
-                val waitLimit = if (onScreen(j)) 6000 else 10000   // 화면 밖에서는 늦게 뜨므로 더 기다림
+                // 화면 밖에서는 늦게 뜨므로 더 기다림. 실패할수록 더 오래 기다림 (서버가 느려지는 경우)
+                val base = if (onScreen(j)) 6000 else 10000
+                val waitLimit = (base + j.failedTaps * 5000L).coerceAtMost(30000L)
+                // 넘긴 뒤 이미지를 받는 중이면(4초 안에 요청) 실패로 세지 않고 더 기다림
+                val loading = j.lastNetAt > j.lastTapAt && now - j.lastNetAt < 4000
                 when {
                     // 새 이미지가 나오고 0.8초 지나면 다음 장
                     j.lastNewAt > j.lastTapAt && now - j.lastNewAt > 800 -> {
@@ -209,9 +217,9 @@ class Collector(private val a: MainActivity) {
                         j.failedTaps = 0
                         tap(j)
                     }
-                    j.lastTapAt == 0L || now - j.lastTapAt > waitLimit -> {
+                    j.lastTapAt == 0L || (now - j.lastTapAt > waitLimit && (!loading || now - j.lastTapAt > 45000)) -> {
                         if (j.lastTapAt != 0L) j.failedTaps++
-                        val limit = if (onScreen(j)) 3 else 6
+                        val limit = if (onScreen(j)) 5 else 7
                         if (j.failedTaps >= limit) {
                             pause(j, "${j.failedTaps}번 넘겨도 새 이미지가 안 나와요")
                             return@snap
@@ -289,7 +297,7 @@ class Collector(private val a: MainActivity) {
             "try{document.elementsFromPoint(W/2,H/2).forEach(function(e){var r=e.getBoundingClientRect();if(!big(r))return;" +
             "var b=getComputedStyle(e).backgroundImage;var m=b&&b.match(/url\\([\"']?([^\"')]+)/);" +
             "if(m)o.push(new URL(m[1],location.href).href);});}catch(e){}" +
-            "return JSON.stringify(o);})()"
+            "o.push('sig:'+location.href+'|'+o.join('|'));return JSON.stringify(o);})()"
         j.wv.evaluateJavascript(js) { res ->
             try {
                 val str = JSONTokener(res).nextValue() as? String
@@ -297,9 +305,14 @@ class Collector(private val a: MainActivity) {
                     val arr = JSONArray(str)
                     for (i in 0 until arr.length()) {
                         val u = arr.getString(i)
-                        if (u.startsWith("http")) {
+                        if (u.startsWith("sig:")) {
+                            // 새 이미지는 아니어도 화면이 바뀌었으면 넘어간 것 (이미 본 이미지를 다시 보여주는 뷰어 등)
+                            if (j.lastSig.isNotEmpty() && u != j.lastSig && u.length > 6 + 2) j.lastNewAt = SystemClock.uptimeMillis()
+                            j.lastSig = u
+                        } else if (u.startsWith("http")) {
                             if (j.found.add(u)) {
                                 j.lastNewAt = SystemClock.uptimeMillis()
+                                j.autoRetries = 0
                                 log(j, "새 이미지 ${j.found.size}번째 찾음 (${where(j)}) $u")
                                 j.grab?.let { g -> if (j.running) JobStore.add(g, u) }
                             }
@@ -355,6 +368,15 @@ class Collector(private val a: MainActivity) {
         updateText(j)
         report()
         refreshBar()
+        // 서버가 잠깐 느려졌을 수 있으니 30초 뒤 스스로 다시 시도 (연속 3번까지)
+        if (j.autoRetries < 3) {
+            j.autoRetries++
+            log(j, "30초 뒤 다시 넘겨 볼게요 (${j.autoRetries}/3)")
+            j.text += "\n30초 뒤 다시 시도해요 (${j.autoRetries}/3)"
+            if (barFor === j) barText?.text = j.text
+            main.postDelayed({ if (jobs.contains(j) && j.paused) resume(j) }, 30000)
+            return
+        }
         if (!onScreen(j)) BgWork.collectPaused(a, j.title(), j.found.size)
     }
 

@@ -473,6 +473,32 @@ object JobStore {
         return j
     }
 
+    /** n번(0부터) 칸부터 끝까지 지움: '이 페이지부터 새로 받기' (메인 스레드) */
+    fun truncateFrom(j: GrabJob, n: Int) {
+        if (n < 0 || n >= j.slots.size) return
+        for (i in n until j.slots.size) {
+            j.slots[i]?.file?.delete()
+            j.failed.remove(i)
+            j.failReason.remove(i)
+            j.dupSlots.remove(i)
+            j.dupOf.remove(i)
+            j.fixed.remove(i)
+        }
+        while (j.slots.size > n) j.slots.removeAt(j.slots.size - 1)
+        j.urls = j.urls.take(n)
+        j.hashes.entries.removeAll { it.value >= n }
+        j.failCodes.clear()
+        j.failReason.values.forEach { c -> j.failCodes[c] = (j.failCodes[c] ?: 0) + 1 }
+        j.total = j.slots.size
+        j.fails = j.failed.size
+        j.done = j.total
+        j.pics.clear()
+        j.slots.forEach { p -> if (p != null) j.pics.add(p) }
+        j.addLog("${n + 1}번부터 지우고 새로 받기 시작")
+        updateStatus(j)
+        changed(j, true)
+    }
+
     /** 저장해 둔 작업을 보기만 하려고 불러옴 (받기 시작 안 함, 작업 목록에도 안 넣음) */
     fun peek(s: CollectSaves.Save): GrabJob? {
         val j = build(s) ?: return null
@@ -737,7 +763,7 @@ object JobStore {
     }
 
     private fun fetched(j: GrabJob, i: Int, url: String, f: File, ok: Boolean, code: Int) {
-        if (j.canceled || i >= j.slots.size) return
+        if (j.canceled || i >= j.slots.size || j.urls.getOrNull(i) != url) return
         if (ok) {
             val h = hashOf(f)
             val same = h?.let { j.hashes[it] }

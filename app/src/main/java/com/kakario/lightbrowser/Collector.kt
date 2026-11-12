@@ -758,6 +758,7 @@ class Collector(private val a: MainActivity) {
     private fun choose(s: CollectSaves.Save) {
         val acts = ArrayList<Pair<String, () -> Unit>>()
         if (hereOk()) acts.add("지금 보는 페이지부터 이어 받기 (이미 받은 장은 건너뜀)" to { resumeSaved(s, here = true) })
+        if (hereOk()) acts.add("이 페이지부터 새로 받기 (받은 것 중 같은 장을 찾아 확인)" to { findHere(s) })
         acts.add("저장한 페이지(멈췄던 곳)에서 이어 받기" to { resumeSaved(s, here = false) })
         acts.add("받은 것만 정리 (더 안 넘기고 끝)" to { finishSaved(s) })
         acts.add("버리기" to {
@@ -789,7 +790,150 @@ class Collector(private val a: MainActivity) {
         if (JobStore.get(g.id) != null) a.openGrabJob(g)
     }
 
-    private fun resumeSaved(s: CollectSaves.Save, here: Boolean) {
+    // ================= 이 페이지부터 새로 받기 =================
+
+    /** 지금 화면 그림과 가장 비슷한 '받은 이미지'를 찾아 보여주고 확인 */
+    private fun findHere(s: CollectSaves.Save) {
+        val w = a.currentWebView() ?: return
+        val js = "(function(){var W=innerWidth,H=innerHeight,b=null,ba=0;" +
+            "document.querySelectorAll('img,canvas').forEach(function(e){var r=e.getBoundingClientRect();" +
+            "var x=Math.max(r.left,0),y=Math.max(r.top,0),w=Math.min(r.right,W)-x,h=Math.min(r.bottom,H)-y;" +
+            "if(w>0&&h>0&&w*h>ba){ba=w*h;b={s:e.currentSrc||e.src||'',x:x,y:y,w:w,h:h,iw:W};}});" +
+            "return b?JSON.stringify(b):'';})()"
+        val wait = android.app.ProgressDialog(a).apply {
+            setMessage("받은 이미지 중에서 이 페이지와 같은 장을 찾는 중…")
+            setCancelable(false)
+            show()
+        }
+        w.evaluateJavascript(js) { res ->
+            val str = try { JSONTokener(res).nextValue() as? String } catch (e: Exception) { null }
+            val o = try { if (str.isNullOrEmpty()) null else org.json.JSONObject(str) } catch (e: Exception) { null }
+            if (o == null) { wait.dismiss(); a.toastMsg("이 페이지에서 그림을 찾지 못했어요"); return@evaluateJavascript }
+            val src = o.optString("s")
+            val k = w.width / o.optDouble("iw", 1.0)
+            val loc = IntArray(2)
+            w.getLocationInWindow(loc)
+            val rect = android.graphics.Rect((loc[0] + o.optDouble("x") * k).toInt(), (loc[1] + o.optDouble("y") * k).toInt(),
+                (loc[0] + (o.optDouble("x") + o.optDouble("w")) * k).toInt(), (loc[1] + (o.optDouble("y") + o.optDouble("h")) * k).toInt())
+            if (rect.width() <= 0 || rect.height() <= 0) { wait.dismiss(); a.toastMsg("이 페이지에서 그림을 찾지 못했어요"); return@evaluateJavascript }
+            val bmp = android.graphics.Bitmap.createBitmap(rect.width(), rect.height(), android.graphics.Bitmap.Config.ARGB_8888)
+            android.view.PixelCopy.request(a.window, rect, bmp, { r ->
+                val hash = if (r == android.view.PixelCopy.SUCCESS) JobStore.dHash(bmp) else null
+                bmp.recycle()
+                Thread {
+                    val best = matchSaved(s, src, hash)
+                    main.post {
+                        wait.dismiss()
+                        if (best == null) a.toastMsg("받은 이미지 중에 비슷한 장이 없어요")
+                        else confirmFrom(s, best.first, best.second)
+                    }
+                }.start()
+            }, main)
+        }
+    }
+
+    /** (받은 칸 번호(0부터), 비슷한 정도 %) — 주소가 같으면 바로, 아니면 그림 지문으로 (뒤에서부터) */
+    private fun matchSaved(s: CollectSaves.Save, src: String, hash: Long?): Pair<Int, Int>? {
+        val o = s.o
+        val urls = o.optJSONArray("urls") ?: return null
+        for (i in 0 until urls.length()) if (urls.getString(i) == src) return i to 100
+        if (hash == null) return null
+        val dir = java.io.File(o.optString("dir"))
+        val ok = o.optJSONArray("ok") ?: return null
+        var best = -1
+        var bestD = 65
+        for (k in ok.length() - 1 downTo 0) {
+            val e = ok.getJSONObject(k)
+            val f = java.io.File(dir, e.getString("f"))
+            val h = smallHash(f) ?: continue
+            val d = java.lang.Long.bitCount(h xor hash)
+            if (d < bestD) { bestD = d; best = e.getInt("i") }
+            if (d <= 3) break
+        }
+        if (best < 0 || bestD > 20) return null
+        return best to ((64 - bestD) * 100 / 64)
+    }
+
+    private fun smallHash(f: java.io.File): Long? = try {
+        val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(f.path, o)
+        var sample = 1
+        while (o.outWidth / (sample * 2) >= 48 && o.outHeight / (sample * 2) >= 48) sample *= 2
+        android.graphics.BitmapFactory.decodeFile(f.path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+            ?.let { val h = JobStore.dHash(it); it.recycle(); h }
+    } catch (e: Throwable) { null }
+
+    /** 찾은 받은 이미지를 크게 보여주며 확인 (◀ ▶로 앞뒤 장 바꿔 고를 수 있음) */
+    private fun confirmFrom(s: CollectSaves.Save, start: Int, sim: Int) {
+        val o = s.o
+        val dir = java.io.File(o.optString("dir"))
+        val files = HashMap<Int, java.io.File>()
+        o.optJSONArray("ok")?.let { arr -> for (k in 0 until arr.length()) arr.getJSONObject(k).let { files[it.getInt("i")] = java.io.File(dir, it.getString("f")) } }
+        val idx = files.keys.sorted()
+        if (idx.isEmpty()) return
+        var pos = idx.indexOf(start).takeIf { it >= 0 } ?: idx.indexOfFirst { it >= start }.coerceAtLeast(0)
+        val img = android.widget.ImageView(a).apply {
+            adjustViewBounds = true
+            scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+            setBackgroundColor(Color.BLACK)
+        }
+        val label = TextView(a).apply {
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setTextColor(a.getColor(R.color.text))
+            setPadding(0, a.dp(8), 0, a.dp(4))
+        }
+        fun arrow(t: String, d: Int) = TextView(a).apply {
+            text = t
+            textSize = 22f
+            gravity = Gravity.CENTER
+            setTextColor(a.getColor(R.color.accent))
+            setPadding(a.dp(18), a.dp(4), a.dp(18), a.dp(4))
+            a.ripple(this)
+        }
+        val box = LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(a.dp(16), a.dp(8), a.dp(16), 0)
+        }
+        box.addView(img, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (a.resources.displayMetrics.heightPixels * 0.5f).toInt()))
+        val row = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val prev = arrow("◀", -1)
+        val next = arrow("▶", 1)
+        row.addView(prev)
+        row.addView(label, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(next)
+        box.addView(row)
+        var dlg: android.app.AlertDialog? = null
+        fun show() {
+            val n = idx[pos]
+            label.text = "받은 이미지 ${n + 1}번" + if (n == start) " · 지금 화면과 ${sim}% 비슷" else ""
+            dlg?.getButton(android.app.AlertDialog.BUTTON_POSITIVE)?.text = "${n + 1}번부터 새로 받기"
+            img.setImageDrawable(null)
+            val f = files[n] ?: return
+            Thread {
+                val b = try {
+                    val op = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    android.graphics.BitmapFactory.decodeFile(f.path, op)
+                    var sm = 1
+                    while (op.outHeight / (sm * 2) >= 900) sm *= 2
+                    android.graphics.BitmapFactory.decodeFile(f.path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sm })
+                } catch (e: Throwable) { null }
+                main.post { if (idx[pos] == n) img.setImageBitmap(b) }
+            }.start()
+        }
+        prev.setOnClickListener { if (pos > 0) { pos--; show() } }
+        next.setOnClickListener { if (pos < idx.size - 1) { pos++; show() } }
+        dlg = android.app.AlertDialog.Builder(a)
+            .setTitle("이 페이지가 이 장 맞나요?")
+            .setView(box)
+            .setPositiveButton("새로 받기") { _, _ -> resumeSaved(s, here = true, fromIndex = idx[pos]) }
+            .setNegativeButton("취소", null)
+            .create()
+        dlg.setOnShowListener { show() }
+        dlg.show()
+    }
+
+    private fun resumeSaved(s: CollectSaves.Save, here: Boolean, fromIndex: Int? = null) {
         val page = if (here) a.currentWebView()?.url ?: "" else s.page
         if (here && !hereOk()) {
             a.toastMsg("이어 받을 페이지를 먼저 열어 주세요")
@@ -810,7 +954,12 @@ class Collector(private val a: MainActivity) {
         val wv = if (here) a.currentWebView()!! else a.newTab(page).webView
         val o = s.o
         val j = Job(wv)
-        o.optJSONArray("found")?.let { arr -> for (i in 0 until arr.length()) j.found.add(arr.getString(i)) }
+        if (fromIndex != null) {
+            // 이 장부터 지우고 새로: 남은 장의 주소만 '이미 받음'으로
+            JobStore.truncateFrom(g, fromIndex)
+        } else {
+            o.optJSONArray("found")?.let { arr -> for (i in 0 until arr.length()) j.found.add(arr.getString(i)) }
+        }
         g.urls.forEach { j.found.add(it) }
         j.tapX = o.optDouble("tapX", 0.0).toFloat()
         j.tapY = o.optDouble("tapY", 0.0).toFloat()
@@ -819,12 +968,12 @@ class Collector(private val a: MainActivity) {
         j.pages = o.optInt("pages", 1)
         j.grab = g
         j.lastPics = g.pics.size
-        j.catchingUp = true
-        j.rewound = true
+        j.catchingUp = fromIndex == null
+        j.rewound = fromIndex == null
         grabByView[System.identityHashCode(wv)] = g
         jobs.add(j)
         g.addLog("이어 받기 · 페이지 $page")
-        j.text = if (here) "이 페이지부터 이어 받아요 · 이미 받은 장은 건너뛰어요" else "멈췄던 페이지를 여는 중… 잠시 뒤 이어서 넘겨요"
+        j.text = if (fromIndex != null) "${fromIndex + 1}번부터 새로 받아요" else if (here) "이 페이지부터 이어 받아요 · 이미 받은 장은 건너뛰어요" else "멈췄던 페이지를 여는 중… 잠시 뒤 이어서 넘겨요"
         refreshBar()
         report()
         // 페이지가 뜰 시간을 주고 시작

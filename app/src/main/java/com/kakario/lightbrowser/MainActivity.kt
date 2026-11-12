@@ -107,6 +107,7 @@ class MainActivity : Activity() {
     private lateinit var progress: ProgressBar
     private lateinit var content: FrameLayout
     private lateinit var homeView: ScrollView
+    private lateinit var homeWrap: View
     private lateinit var homeGrid: GridLayout
     private lateinit var backBtn: ImageButton
     private lateinit var fwdBtn: ImageButton
@@ -482,6 +483,7 @@ class MainActivity : Activity() {
             setBackgroundColor(col(R.color.bar))
             addView(homeBox)
         }
+        homeWrap = FastScroll.wrap(homeView)
 
         // ---- 아래: 이동 버튼 ----
         val bottom = LinearLayout(this).apply {
@@ -770,7 +772,7 @@ class MainActivity : Activity() {
         parkCollecting()
         if (t.home) {
             buildHome()
-            content.addView(homeView)
+            content.addView(homeWrap)
         } else {
             content.addView(t.webView)
             t.webView.onResume()

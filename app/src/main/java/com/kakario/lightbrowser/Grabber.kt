@@ -276,8 +276,10 @@ class Grabber(private val a: MainActivity) {
             }
             else -> b?.visibility = View.GONE
         }
-        if (shownPics != j.pics.size) {
-            shownPics = j.pics.size
+        val sig = j.pics.size * 31 + j.fails * 7 + j.dups * 3 + j.fixed.size + j.slots.size * 1000
+        if (shownPics != sig) {
+            shownPics = sig
+            adapter.rebuild()
             adapter.notifyDataSetChanged()
         }
     }
@@ -467,12 +469,17 @@ class Grabber(private val a: MainActivity) {
 
         val cols = if (a.resources.configuration.screenWidthDp >= 600) 5 else 3
         grid = RecyclerView(a).apply {
-            layoutManager = GridLayoutManager(a, cols)
+            layoutManager = GridLayoutManager(a, cols).apply {
+                // '몇 장 건너뜀' 줄은 한 줄 전체를 차지
+                spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
+                    override fun getSpanSize(position: Int) = if (adapter.isGap(position)) cols else 1
+                }
+            }
             adapter = this@Grabber.adapter
             setPadding(a.dp(4), 0, a.dp(4), a.dp(4))
             clipToPadding = false
         }
-        box.addView(grid, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        box.addView(FastScroll.wrap(grid!!), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
         failBox = LinearLayout(a).apply {
             orientation = LinearLayout.VERTICAL
@@ -491,6 +498,7 @@ class Grabber(private val a: MainActivity) {
             val pics = job?.pics ?: return@button
             val all = pics.all { it.selected }
             pics.forEach { it.selected = !all }
+            adapter.rebuild()
             adapter.notifyDataSetChanged()
             updateCount()
         }, LinearLayout.LayoutParams(0, a.dp(46), 0.8f).apply { rightMargin = a.dp(6) })
@@ -553,7 +561,7 @@ class Grabber(private val a: MainActivity) {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 0, 0, a.dp(24))
         }
-        box.addView(ScrollView(a).apply { addView(body) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        box.addView(FastScroll.wrap(ScrollView(a).apply { addView(body) }), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         a.frame.addView(box, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         listRoot = box
         listBody = body
@@ -928,12 +936,75 @@ class Grabber(private val a: MainActivity) {
         null
     }
 
-    inner class Adapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
-        private val pics get() = job?.pics ?: emptyList<GrabJob.Pic>()
+    /** 격자 한 칸: 받은 그림(번호·몇 번째 그림) 또는 '여기서 몇 장 건너뜀' 줄 */
+    private class Item(val pic: GrabJob.Pic?, val picIndex: Int, val no: Int, val fixed: Boolean, val gap: String?)
 
-        override fun getItemCount() = pics.size
+    inner class Adapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+        private var items: List<Item> = emptyList()
+
+        fun isGap(pos: Int) = items.getOrNull(pos)?.gap != null
+
+        /** 칸 순서대로 받은 그림 사이사이에 빠진 칸(중복·실패·받는 중)을 이유와 함께 넣음 */
+        fun rebuild() {
+            val j = job ?: run { items = emptyList(); return }
+            val out = ArrayList<Item>()
+            val slots = j.slots
+            if (slots.isEmpty()) {
+                j.pics.forEachIndexed { k, p -> out.add(Item(p, k, k + 1, false, null)) }
+                items = out
+                return
+            }
+            var picIndex = 0
+            val whys = ArrayList<String>()
+            var gapFrom = -1
+            fun flush(end: Int) {
+                if (gapFrom < 0) return
+                val n = end - gapFrom
+                val range = if (n == 1) "${gapFrom + 1}번" else "${gapFrom + 1}~${end}번"
+                val text = if (n == 1) whys.first() else
+                    whys.groupingBy { it.substringBefore('(') }.eachCount().entries.joinToString(" · ") { (r, c) -> "$r ${c}장" }
+                out.add(Item(null, -1, 0, false, "↓ 여기서 ${n}장 빠짐 ($range) · $text"))
+                whys.clear()
+                gapFrom = -1
+            }
+            for (i in slots.indices) {
+                val p = slots[i]
+                if (p != null) {
+                    flush(i)
+                    // pics는 칸 순서대로 들어 있음
+                    out.add(Item(p, picIndex, i + 1, i in j.fixed, null))
+                    picIndex++
+                } else {
+                    if (gapFrom < 0) gapFrom = i
+                    val why = when {
+                        i in j.dupSlots -> j.dupOf[i]?.let { "중복(${it + 1}번과 같은 그림)" } ?: "중복"
+                        i in j.failed -> "실패: " + FailReason.short(j.failReason[i] ?: -1)
+                        else -> "아직 받는 중"
+                    }
+                    whys.add(why)
+                }
+            }
+            flush(slots.size)
+            items = out
+        }
+
+        override fun getItemCount() = items.size
+
+        override fun getItemViewType(position: Int) = if (isGap(position)) 1 else 0
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+            if (viewType == 1) {
+                val tv = TextView(a).apply {
+                    textSize = 13f
+                    setTextColor(a.getColor(R.color.accent))
+                    setPadding(a.dp(12), a.dp(8), a.dp(12), a.dp(8))
+                    background = GradientDrawable().apply {
+                        cornerRadius = a.dp(8).toFloat()
+                        setColor(a.getColor(R.color.field))
+                    }
+                }
+                return object : RecyclerView.ViewHolder(tv) {}
+            }
             val cell = FrameLayout(a)
             val img = ImageView(a).apply {
                 scaleType = ImageView.ScaleType.CENTER_CROP
@@ -963,7 +1034,16 @@ class Grabber(private val a: MainActivity) {
         }
 
         override fun onBindViewHolder(h: RecyclerView.ViewHolder, position: Int) {
-            val p = pics.getOrNull(position) ?: return
+            val item = items.getOrNull(position) ?: return
+            if (item.gap != null) {
+                val tv = h.itemView as TextView
+                tv.text = item.gap
+                tv.layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(a.dp(4), a.dp(6), a.dp(4), a.dp(6))
+                }
+                return
+            }
+            val p = item.pic ?: return
             val cell = h.itemView as FrameLayout
             val w = (grid?.width?.takeIf { it > 0 } ?: a.resources.displayMetrics.widthPixels) /
                 ((grid?.layoutManager as? GridLayoutManager)?.spanCount ?: 3)
@@ -973,7 +1053,7 @@ class Grabber(private val a: MainActivity) {
             val img = cell.findViewById<ImageView>(1)
             val mark = cell.findViewById<TextView>(2)
             val num = cell.findViewById<TextView>(3)
-            num.text = (position + 1).toString()
+            num.text = item.no.toString() + if (item.fixed) " · 화면" else ""
             img.alpha = if (p.selected) 1f else 0.3f
             mark.text = if (p.selected) "✓" else ""
             mark.background = GradientDrawable().apply {
@@ -1004,7 +1084,7 @@ class Grabber(private val a: MainActivity) {
                 updateCount()
             }
             cell.setOnLongClickListener {
-                openPreview(h.bindingAdapterPosition)
+                openPreview(item.picIndex)
                 true
             }
         }

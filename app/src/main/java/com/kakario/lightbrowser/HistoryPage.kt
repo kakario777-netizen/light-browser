@@ -91,7 +91,7 @@ class HistoryPage(private val a: MainActivity) {
         }
         rv.addOnItemTouchListener(dragListener)
         list = rv
-        content.addView(rv)
+        content.addView(FastScroll.wrap(rv))
         emptyText = TextView(a).apply {
             text = "방문 기록이 없어요"
             textSize = 15f

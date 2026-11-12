@@ -135,7 +135,7 @@ class Pages(private val a: MainActivity) {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 0, 0, a.dp(24))
         }
-        box.addView(ScrollView(a).apply { addView(body) },
+        box.addView(FastScroll.wrap(ScrollView(a).apply { addView(body) }),
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         val st = a.store
 
@@ -241,7 +241,7 @@ class Pages(private val a: MainActivity) {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 0, 0, a.dp(24))
         }
-        box.addView(ScrollView(a).apply { addView(body) },
+        box.addView(FastScroll.wrap(ScrollView(a).apply { addView(body) }),
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         val st = a.store
         val refreshers = ArrayList<() -> Unit>()
@@ -411,7 +411,7 @@ class Pages(private val a: MainActivity) {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 0, 0, a.dp(24))
         }
-        box.addView(ScrollView(a).apply { addView(body) },
+        box.addView(FastScroll.wrap(ScrollView(a).apply { addView(body) }),
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         val fmt = java.text.SimpleDateFormat("M월 d일 HH:mm", java.util.Locale.KOREA)
         var any = false
@@ -490,7 +490,7 @@ class Pages(private val a: MainActivity) {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 0, 0, a.dp(24))
         }
-        box.addView(ScrollView(a).apply { addView(body) },
+        box.addView(FastScroll.wrap(ScrollView(a).apply { addView(body) }),
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         downloadsBody = body
         Downloads.onChange = { renderDownloads() }

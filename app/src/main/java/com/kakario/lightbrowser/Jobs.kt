@@ -504,8 +504,12 @@ object JobStore {
     }
 
     /** 이미지 하나 추가하고 바로 받기 시작 (메인 스레드) */
-    fun add(j: GrabJob, url: String) {
+    fun add(j: GrabJob, url: String, fill: Int? = null) {
         if (j.canceled) return
+        if (fill != null && reuse(j, fill, url)) {
+            fetch(j, fill, url, attempt = 1)
+            return
+        }
         val i = j.slots.size
         j.slots.add(null)
         j.urls = j.urls + url
@@ -514,18 +518,37 @@ object JobStore {
     }
 
     /** 페이지에서 직접 꺼낸 그림(주소 없는 그림)을 바로 저장 (메인 스레드) */
-    fun addBytes(j: GrabJob, bytes: ByteArray, ext: String) {
+    fun addBytes(j: GrabJob, bytes: ByteArray, ext: String, fill: Int? = null) {
         if (j.canceled) return
-        val i = j.slots.size
-        val tag = "page-image-${i + 1}.$ext"
-        j.slots.add(null)
-        j.urls = j.urls + tag
-        j.total = j.slots.size
+        val i: Int
+        val tag: String
+        if (fill != null && reuse(j, fill, "page-image-${fill + 1}.$ext")) {
+            i = fill
+            tag = j.urls[i]
+        } else {
+            i = j.slots.size
+            tag = "page-image-${i + 1}.$ext"
+            j.slots.add(null)
+            j.urls = j.urls + tag
+            j.total = j.slots.size
+        }
         pool.execute {
             val f = fileFor(j, i, tag)
             val ok = runCatching { FileOutputStream(f).use { it.write(bytes) } }.isSuccess
             main.post { fetched(j, i, tag, f, ok, if (ok) 200 else -1) }
         }
+    }
+
+    /** 실패했던 칸을 새 주소로 다시 씀 (앞에서 이어 받을 때 순서 유지) */
+    private fun reuse(j: GrabJob, i: Int, url: String): Boolean {
+        if (i !in j.failed || i >= j.slots.size) return false
+        j.failed.remove(i)
+        j.failReason.remove(i)?.let { c -> j.failCodes[c]?.let { n -> if (n <= 1) j.failCodes.remove(c) else j.failCodes[c] = n - 1 } }
+        j.fails = j.failed.size
+        j.urls = j.urls.toMutableList().also { it[i] = url }
+        j.done--
+        j.addLog("${i + 1}번(실패했던 칸)을 새로 찾은 그림으로 채움\n          $url")
+        return true
     }
 
     /** 실패한 것만 다시 받기 */
@@ -697,7 +720,7 @@ object JobStore {
                 f.delete()
                 j.dupSlots.add(i)
                 j.addLog("${i + 1}번은 ${same + 1}번과 똑같은 그림이라 건너뜀 (주소만 다름)\n          $url")
-                onDuplicate?.invoke(j, i)
+                onDuplicate?.invoke(j, same)
                 j.done++
                 updateStatus(j)
                 if (j.state != GrabJob.COLLECTING && j.done >= j.total) finish(j) else changed(j)

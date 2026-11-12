@@ -39,7 +39,7 @@ class Collector(private val a: MainActivity) {
     init {
         CollectSaves.init(a)
         // 받고 보니 이미 받은 그림과 같으면: 화면만 바뀌고 실제로는 안 넘어간 것일 수 있음
-        JobStore.onDuplicate = { g, _ -> jobs.firstOrNull { it.grab === g }?.let { onDup(it) } }
+        JobStore.onDuplicate = { g, same -> jobs.firstOrNull { it.grab === g }?.let { onDup(it, same) } }
     }
 
     inner class Job(val wv: WebView) {
@@ -65,6 +65,8 @@ class Collector(private val a: MainActivity) {
         val foundNorm = HashSet<String>()   // 주소 꼬리를 뗀 그림 파일 주소
         var lastGrabAt = 0L     // 주소 없는 그림을 마지막으로 꺼낸 때
         var grabbing = false
+        var rewound = false     // 저장한 곳보다 앞에서 이어 받는 중
+        var cursor = -1         // 지금 화면이 이미 받은 몇 번째 장인지 (빈 칸 채우기용)
         val saver = Runnable { saveNow(this) }
         var goodMethod = -1     // 이 사이트에서 통한 넘기기 방법
         var lastMethod = 0
@@ -360,7 +362,10 @@ class Collector(private val a: MainActivity) {
                                 j.sigOnly = 0
                                 scheduleSave(j)
                                 log(j, "새 이미지 ${j.found.size}번째 찾음 (${where(j)}) $u")
-                                j.grab?.let { g -> if (j.running) JobStore.add(g, u) }
+                                j.grab?.let { g -> if (j.running) JobStore.add(g, u, fillSlot(j)) }
+                            } else if (j.rewound) {
+                                // 이미 받은 장 → 지금 위치만 기억
+                                j.grab?.urls?.indexOf(u)?.takeIf { it >= 0 }?.let { j.cursor = it }
                             }
                         }
                     }
@@ -425,7 +430,7 @@ class Collector(private val a: MainActivity) {
                     j.sigOnly = 0
                     scheduleSave(j)
                     log(j, "주소 없는 그림 꺼냄 ${j.found.size}번째 (${if (src.startsWith("blob:")) "blob" else src}) · ${bytes.size / 1024}KB")
-                    JobStore.addBytes(g, bytes, ext)
+                    JobStore.addBytes(g, bytes, ext, fillSlot(j))
                 }
             }.start()
         }
@@ -556,7 +561,21 @@ class Collector(private val a: MainActivity) {
 
     // ================= 저장·이어 받기 =================
 
-    private fun onDup(j: Job) {
+    /** 앞에서 이어 받을 때: 지금 위치 바로 뒤가 실패했던 칸이면 그 칸을 채움 (순서 유지) */
+    private fun fillSlot(j: Job): Int? {
+        val g = j.grab ?: return null
+        if (!j.rewound || j.cursor < 0) return null
+        var k = j.cursor + 1
+        while (k < g.slots.size && k in g.dupSlots) k++
+        if (k < g.slots.size && k in g.failed) {
+            j.cursor = k
+            return k
+        }
+        return null
+    }
+
+    private fun onDup(j: Job, same: Int) {
+        if (j.rewound) j.cursor = same
         if (j.catchingUp) return   // 이어 받기로 되돌아간 거라 중복이 당연함
         j.dupStreak++
         log(j, "받고 보니 이미 받은 그림 (${j.dupStreak}번 연속) · 넘기기가 안 됐을 수 있어 다시 확인")
@@ -615,6 +634,19 @@ class Collector(private val a: MainActivity) {
             begin()
             return
         }
+        // 지금 보는 사이트에 저장해 둔 게 있으면 바로 물어봄
+        val host = Uri.parse(a.currentWebView()?.url ?: "").host
+        val same = if (hereOk() && host != null) list.firstOrNull { Uri.parse(it.page).host == host } else null
+        if (same != null) {
+            android.app.AlertDialog.Builder(a)
+                .setTitle("여기서부터 이어 받으시겠어요?")
+                .setMessage("'${same.title}' (${same.count}장 받아 둠)\n\n지금 보는 페이지부터 이어서 넘겨요. 이미 받은 장은 알아서 건너뛰고, 못 받았던 장만 채워요.")
+                .setPositiveButton("여기서부터 이어 받기") { _, _ -> resumeSaved(same, here = true) }
+                .setNeutralButton("다른 선택") { _, _ -> pickSaved(list, "넘기며 모으기", newOption = true) }
+                .setNegativeButton("새로 모으기") { _, _ -> begin() }
+                .show()
+            return
+        }
         pickSaved(list, "넘기며 모으기", newOption = true)
     }
 
@@ -633,22 +665,31 @@ class Collector(private val a: MainActivity) {
             .show()
     }
 
+    /** 지금 보는 탭에서 이어 받을 수 있는지 */
+    private fun hereOk(): Boolean {
+        val w = a.currentWebView() ?: return false
+        return jobOf(w) == null && pending?.wv !== w && (w.url ?: "").startsWith("http")
+    }
+
     private fun choose(s: CollectSaves.Save) {
+        val acts = ArrayList<Pair<String, () -> Unit>>()
+        if (hereOk()) acts.add("지금 보는 페이지부터 이어 받기 (이미 받은 장은 건너뜀)" to { resumeSaved(s, here = true) })
+        acts.add("저장한 페이지(멈췄던 곳)에서 이어 받기" to { resumeSaved(s, here = false) })
+        acts.add("받은 것만 정리 (더 안 넘기고 끝)" to { finishSaved(s) })
+        acts.add("버리기" to {
+            android.app.AlertDialog.Builder(a)
+                .setMessage("저장한 작업과 받아 둔 이미지 ${s.count}장을 지울까요?")
+                .setPositiveButton("지우기") { _, _ ->
+                    CollectSaves.delete(s.id)
+                    val d = java.io.File(s.o.optString("dir"))
+                    JobStore.get(s.id)?.let { JobStore.remove(it) } ?: Thread { d.deleteRecursively() }.start()
+                }
+                .setNegativeButton("취소", null).show()
+        })
         android.app.AlertDialog.Builder(a)
-            .setTitle(s.title)
-            .setMessage("${s.count}장 받아 둠\n\n이어 받기: 멈췄던 페이지를 열고 거기서부터 다시 넘겨요. 이미 받은 장은 건너뛰어요.\n받은 것만 정리: 더 넘기지 않고 지금까지 받은 걸로 끝내요.")
-            .setPositiveButton("이어 받기") { _, _ -> resumeSaved(s) }
-            .setNeutralButton("받은 것만 정리") { _, _ -> finishSaved(s) }
-            .setNegativeButton("버리기") { _, _ ->
-                android.app.AlertDialog.Builder(a)
-                    .setMessage("저장한 작업과 받아 둔 이미지 ${s.count}장을 지울까요?")
-                    .setPositiveButton("지우기") { _, _ ->
-                        CollectSaves.delete(s.id)
-                        val d = java.io.File(s.o.optString("dir"))
-                        JobStore.get(s.id)?.let { JobStore.remove(it) } ?: Thread { d.deleteRecursively() }.start()
-                    }
-                    .setNegativeButton("취소", null).show()
-            }
+            .setTitle("${s.title} · ${s.count}장 받아 둠")
+            .setItems(acts.map { it.first }.toTypedArray()) { _, w -> acts[w].second() }
+            .setNegativeButton("닫기", null)
             .show()
     }
 
@@ -664,8 +705,12 @@ class Collector(private val a: MainActivity) {
         if (JobStore.get(g.id) != null) a.openGrabJob(g)
     }
 
-    private fun resumeSaved(s: CollectSaves.Save) {
-        val page = s.page
+    private fun resumeSaved(s: CollectSaves.Save, here: Boolean) {
+        val page = if (here) a.currentWebView()?.url ?: "" else s.page
+        if (here && !hereOk()) {
+            a.toastMsg("이어 받을 페이지를 먼저 열어 주세요")
+            return
+        }
         if (page.isBlank()) {
             a.toastMsg("멈췄던 페이지 주소가 없어요")
             return
@@ -678,7 +723,7 @@ class Collector(private val a: MainActivity) {
             return
         }
         a.closeOverlays()
-        val wv = a.newTab(page).webView
+        val wv = if (here) a.currentWebView()!! else a.newTab(page).webView
         val o = s.o
         val j = Job(wv)
         o.optJSONArray("found")?.let { arr -> for (i in 0 until arr.length()) j.found.add(arr.getString(i)) }
@@ -691,14 +736,15 @@ class Collector(private val a: MainActivity) {
         j.grab = g
         j.lastPics = g.pics.size
         j.catchingUp = true
+        j.rewound = true
         grabByView[System.identityHashCode(wv)] = g
         jobs.add(j)
         g.addLog("이어 받기 · 페이지 $page")
-        j.text = "멈췄던 페이지를 여는 중… 잠시 뒤 이어서 넘겨요"
+        j.text = if (here) "이 페이지부터 이어 받아요 · 이미 받은 장은 건너뛰어요" else "멈췄던 페이지를 여는 중… 잠시 뒤 이어서 넘겨요"
         refreshBar()
         report()
         // 페이지가 뜰 시간을 주고 시작
-        main.postDelayed({ if (jobs.contains(j) && !j.running) run(j) }, 4000)
+        main.postDelayed({ if (jobs.contains(j) && !j.running) run(j) }, if (here) 800 else 4000)
     }
 
     // ================= 아래 막대 =================

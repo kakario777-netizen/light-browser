@@ -430,8 +430,18 @@ class Pages(private val a: MainActivity) {
                 row(body, s.title,
                     "받은 ${s.count}장" + (if (extra.isNotEmpty()) " · $extra" else "") + " · ${fmt.format(java.util.Date(s.savedAt))} 저장\n멈춘 곳: $page",
                     null) {
-                    back()
-                    a.chooseSaved(s)
+                    android.app.AlertDialog.Builder(a)
+                        .setTitle(s.title)
+                        .setItems(arrayOf("받은 이미지 보기 (${s.count}장)", "이어 받기 · 정리 · 버리기")) { _, w ->
+                            if (w == 0) {
+                                val g = JobStore.peek(s)
+                                if (g == null) a.toastMsg("받아 둔 파일을 찾을 수 없어요") else a.viewGrabJob(g)
+                            } else {
+                                back()
+                                a.chooseSaved(s)
+                            }
+                        }
+                        .setNegativeButton("닫기", null).show()
                 }
             }
         }
@@ -459,8 +469,7 @@ class Pages(private val a: MainActivity) {
             section(body, "다 못 받은 작업 (${failedJobs.size})")
             failedJobs.forEach { g ->
                 row(body, g.title, "받은 ${g.pics.size}장 · 실패 ${g.fails} (${g.failSummary()})", null) {
-                    back()
-                    a.openGrabJob(g)
+                    a.viewGrabJob(g)
                 }
             }
         }

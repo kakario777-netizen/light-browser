@@ -454,8 +454,37 @@ object JobStore {
 
     /** 저장해 둔 넘기며 모으기를 다시 불러옴 (받던 폴더 그대로, 못 받은 건 다시 받음) */
     fun restore(s: CollectSaves.Save): GrabJob? {
-        val o = s.o
         get(s.id)?.let { return it }
+        val j = build(s) ?: return null
+        val urls = j.urls
+        j.state = GrabJob.COLLECTING
+        val missing = j.slots.indices.filter { j.slots[it] == null && it !in j.failed && it !in j.dupSlots }
+            .filter { i ->
+                // 페이지에서 직접 꺼낸 그림은 다시 받을 주소가 없음 → 실패로
+                if (urls[i].startsWith("http")) true else { j.failed.add(i); j.failReason[i] = -1; j.failCodes[-1] = (j.failCodes[-1] ?: 0) + 1; false }
+            }
+        j.fails = j.failed.size
+        j.done = j.total - missing.size
+        j.addLog("저장해 둔 작업 다시 불러옴 · 받은 ${j.pics.size}장 · 다시 받을 ${missing.size}장")
+        updateStatus(j)
+        jobs.add(0, j)
+        missing.forEach { i -> fetch(j, i, urls[i], attempt = 1) }
+        changed(j, true)
+        return j
+    }
+
+    /** 저장해 둔 작업을 보기만 하려고 불러옴 (받기 시작 안 함, 작업 목록에도 안 넣음) */
+    fun peek(s: CollectSaves.Save): GrabJob? {
+        val j = build(s) ?: return null
+        j.state = GrabJob.CANCELED
+        j.done = j.total
+        j.status = "저장해 둔 작업 · 받은 ${j.pics.size}장" + (if (j.fails > 0) " · 실패 ${j.fails}" else "") +
+            (if (j.dups > 0) " · 중복 건너뜀 ${j.dups}" else "")
+        return j
+    }
+
+    private fun build(s: CollectSaves.Save): GrabJob? {
+        val o = s.o
         val dir = File(o.optString("dir"))
         if (!dir.exists()) return null
         val j = GrabJob(s.id, o.optString("title"), dir, o.optString("referer").ifEmpty { null }, o.optString("ua").ifEmpty { null })
@@ -490,19 +519,6 @@ object JobStore {
         j.slots.forEach { p -> if (p != null) j.pics.add(p) }
         j.total = j.slots.size
         j.fails = j.failed.size
-        j.state = GrabJob.COLLECTING
-        val missing = j.slots.indices.filter { j.slots[it] == null && it !in j.failed && it !in j.dupSlots }
-            .filter { i ->
-                // 페이지에서 직접 꺼낸 그림은 다시 받을 주소가 없음 → 실패로
-                if (urls[i].startsWith("http")) true else { j.failed.add(i); j.failReason[i] = -1; j.failCodes[-1] = (j.failCodes[-1] ?: 0) + 1; false }
-            }
-        j.fails = j.failed.size
-        j.done = j.total - missing.size
-        j.addLog("저장해 둔 작업 다시 불러옴 · 받은 ${j.pics.size}장 · 다시 받을 ${missing.size}장")
-        updateStatus(j)
-        jobs.add(0, j)
-        missing.forEach { i -> fetch(j, i, urls[i], attempt = 1) }
-        changed(j, true)
         return j
     }
 

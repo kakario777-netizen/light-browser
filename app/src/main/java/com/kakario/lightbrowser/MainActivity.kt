@@ -1816,6 +1816,9 @@ class MainActivity : Activity() {
 
     fun openDownloadsPage() = pages.openDownloads()
 
+    /** 목록 화면은 그대로 두고 그 위에 작업 화면 (뒤로가기로 목록에 돌아옴) */
+    fun viewGrabJob(g: GrabJob) = grabber.openJob(g)
+
     fun snackMsg(text: String) = showSnack(text, "작업 보기", 4_000) { closeOverlays(); grabber.openList() }
 
     fun selectTabOf(w: WebView) {

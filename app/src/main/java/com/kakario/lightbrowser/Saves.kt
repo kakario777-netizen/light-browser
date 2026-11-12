@@ -75,6 +75,7 @@ object CollectSaves {
         o.put("failed", failed)
         o.put("dups", JSONArray(g.dupSlots.toList()))
         o.put("hashes", JSONObject(g.hashes as Map<*, *>))
+        o.put("dh", JSONObject().also { d -> g.dhash.forEach { (i, h) -> d.put(i.toString(), h) } })
         o.put("found", JSONArray(found.toList()))
         val text = o.toString()
         val id = g.id

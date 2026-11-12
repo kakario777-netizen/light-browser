@@ -803,6 +803,7 @@ class Collector(private val a: MainActivity) {
             "document.querySelectorAll('img,canvas').forEach(function(e){var r=e.getBoundingClientRect();" +
             "var x=Math.max(r.left,0),y=Math.max(r.top,0),w=Math.min(r.right,W)-x,h=Math.min(r.bottom,H)-y;" +
             "if(w>0&&h>0&&w*h>ba){ba=w*h;b={s:e.currentSrc||e.src||'',x:x,y:y,w:w,h:h,iw:W};}});" +
+            "if(b){b.all=[];document.querySelectorAll('img').forEach(function(e){var s=e.currentSrc||e.src;if(s&&b.all.length<300)b.all.push(s);});}" +
             "return b?JSON.stringify(b):'';})()"
         val wait = android.app.ProgressDialog(a).apply {
             setMessage("받은 이미지 중에서 이 페이지와 같은 장을 찾는 중…")
@@ -814,6 +815,8 @@ class Collector(private val a: MainActivity) {
             val o = try { if (str.isNullOrEmpty()) null else org.json.JSONObject(str) } catch (e: Exception) { null }
             if (o == null) { wait.dismiss(); a.toastMsg("이 페이지에서 그림을 찾지 못했어요"); return@evaluateJavascript }
             val src = o.optString("s")
+            val all = HashSet<String>()
+            o.optJSONArray("all")?.let { arr -> for (i in 0 until arr.length()) all.add(arr.getString(i)) }
             val k = w.width / o.optDouble("iw", 1.0)
             val loc = IntArray(2)
             w.getLocationInWindow(loc)
@@ -825,7 +828,7 @@ class Collector(private val a: MainActivity) {
                 val hash = if (r == android.view.PixelCopy.SUCCESS) JobStore.dHash(bmp) else null
                 bmp.recycle()
                 Thread {
-                    val best = matchSaved(s, src, hash)
+                    val best = matchSaved(s, src, all, hash)
                     main.post {
                         wait.dismiss()
                         if (best == null) a.toastMsg("받은 이미지 중에 비슷한 장이 없어요")
@@ -836,24 +839,53 @@ class Collector(private val a: MainActivity) {
         }
     }
 
-    /** (받은 칸 번호(0부터), 비슷한 정도 %) — 주소가 같으면 바로, 아니면 그림 지문으로 (뒤에서부터) */
-    private fun matchSaved(s: CollectSaves.Save, src: String, hash: Long?): Pair<Int, Int>? {
+    /**
+     * (받은 칸 번호(0부터), 비슷한 정도 %).
+     * 1) 주소가 같으면 바로 2) 페이지에 있는 다른 그림 주소로 대략 위치를 잡고(없으면 멈췄던 곳)
+     * 3) 그 자리부터 앞뒤로 번갈아 가며 썸네일 지문 비교 — 충분히 비슷하면 바로 멈춤.
+     * 지문은 받을 때 미리 계산해 둔 걸 쓰고, 없으면 계산해서 폴더에 남겨 다음엔 바로.
+     */
+    private fun matchSaved(s: CollectSaves.Save, src: String, all: Set<String>, hash: Long?): Pair<Int, Int>? {
         val o = s.o
         val urls = o.optJSONArray("urls") ?: return null
-        for (i in 0 until urls.length()) if (urls.getString(i) == src) return i to 100
+        val n = urls.length()
+        var anchor = -1
+        for (i in 0 until n) {
+            val u = urls.getString(i)
+            if (u == src) return i to 100
+            if (anchor < 0 && u in all) anchor = i
+        }
         if (hash == null) return null
         val dir = java.io.File(o.optString("dir"))
-        val ok = o.optJSONArray("ok") ?: return null
+        val files = HashMap<Int, String>()
+        o.optJSONArray("ok")?.let { arr -> for (k in 0 until arr.length()) arr.getJSONObject(k).let { files[it.getInt("i")] = it.getString("f") } }
+        if (files.isEmpty()) return null
+        val known = HashMap<Int, Long>()
+        o.optJSONObject("dh")?.let { h -> h.keys().forEach { k -> k.toIntOrNull()?.let { i -> known[i] = h.optLong(k) } } }
+        val cacheFile = java.io.File(dir, "thumbhash.json")
+        try { org.json.JSONObject(cacheFile.readText()).let { h -> h.keys().forEach { k -> k.toIntOrNull()?.let { i -> known.putIfAbsent(i, h.optLong(k)) } } } } catch (e: Exception) {}
+        if (anchor < 0) anchor = files.keys.max()
         var best = -1
         var bestD = 65
-        for (k in ok.length() - 1 downTo 0) {
-            val e = ok.getJSONObject(k)
-            val f = java.io.File(dir, e.getString("f"))
-            val h = smallHash(f) ?: continue
+        var added = false
+        var step = 0
+        var checked = 0
+        while (true) {
+            // anchor, anchor-1, anchor+1, anchor-2, anchor+2 …
+            val i = if (step == 0) anchor else if (step % 2 == 1) anchor - (step + 1) / 2 else anchor + step / 2
+            step++
+            if (anchor - (step + 1) / 2 < -1 && anchor + step / 2 > n) break
+            val f = files[i] ?: continue
+            val h = known[i] ?: smallHash(java.io.File(dir, f))?.also { known[i] = it; added = true } ?: continue
+            checked++
             val d = java.lang.Long.bitCount(h xor hash)
-            if (d < bestD) { bestD = d; best = e.getInt("i") }
-            if (d <= 3) break
+            if (d < bestD) { bestD = d; best = i }
+            if (bestD <= 6) break                        // 거의 같은 그림
+            if (checked >= 80 && bestD <= 12) break      // 가까운 데서 충분히 비슷한 걸 찾음
         }
+        if (added) try {
+            cacheFile.writeText(org.json.JSONObject().also { j -> known.forEach { (i, h) -> j.put(i.toString(), h) } }.toString())
+        } catch (e: Exception) {}
         if (best < 0 || bestD > 20) return null
         return best to ((64 - bestD) * 100 / 64)
     }

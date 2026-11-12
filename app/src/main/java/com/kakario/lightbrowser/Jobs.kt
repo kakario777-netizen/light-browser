@@ -44,6 +44,8 @@ class GrabJob(val id: Long, var title: String, val dir: File, val referer: Strin
     internal val dupSlots = sortedSetOf<Int>()      // 이미 받은 것과 같아서 건너뛴 순번
     val dups get() = dupSlots.size
     internal val dupOf = HashMap<Int, Int>()        // 중복 칸 → 원래 칸
+    /** 칸별 그림 지문(작은 썸네일 지문) — '같은 장 찾기'를 바로 하려고 받을 때 미리 계산 */
+    val dhash = java.util.concurrent.ConcurrentHashMap<Int, Long>()
     /** 화면에 실제로 보였던 그림 (주소 → 그림 지문, 화면 캡처 jpg) — 받은 파일과 비교 */
     val expect = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, ByteArray>>()
     /** 페이지가 최근에 불러온 그림 원본들 (화면 그림과 같은 원본을 찾을 때 씀) */
@@ -483,6 +485,7 @@ object JobStore {
             j.dupSlots.remove(i)
             j.dupOf.remove(i)
             j.fixed.remove(i)
+            j.dhash.remove(i)
         }
         while (j.slots.size > n) j.slots.removeAt(j.slots.size - 1)
         j.urls = j.urls.take(n)
@@ -541,6 +544,7 @@ object JobStore {
             }
         }
         o.optJSONArray("dups")?.let { a -> for (k in 0 until a.length()) j.dupSlots.add(a.getInt(k)) }
+        o.optJSONObject("dh")?.let { h -> h.keys().forEach { k -> k.toIntOrNull()?.let { i -> j.dhash[i] = h.optLong(k) } } }
         o.optJSONObject("hashes")?.let { h -> h.keys().forEach { k -> j.hashes[k] = h.optInt(k) } }
         j.slots.forEach { p -> if (p != null) j.pics.add(p) }
         j.total = j.slots.size
@@ -786,6 +790,7 @@ object JobStore {
             j.slots.forEach { p -> if (p != null) j.pics.add(p) }
             j.failReason.remove(i)
             if (j.expect.containsKey(url)) checkScreen(j, i, url)
+            pool.execute { dHashFile(f)?.let { j.dhash[i] = it } }
         } else {
             j.failed.add(i)
             j.failCodes[code] = (j.failCodes[code] ?: 0) + 1

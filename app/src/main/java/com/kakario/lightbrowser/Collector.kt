@@ -800,9 +800,16 @@ class Collector(private val a: MainActivity) {
     private fun findHere(s: CollectSaves.Save) {
         val w = a.currentWebView() ?: return
         val js = "(function(){var W=innerWidth,H=innerHeight,b=null,ba=0;" +
+            // 그림이 실제로 그려진 칸(빈 여백 빼고)과, 그중 화면에 보이는 부분의 비율까지 구함
             "document.querySelectorAll('img,canvas').forEach(function(e){var r=e.getBoundingClientRect();" +
-            "var x=Math.max(r.left,0),y=Math.max(r.top,0),w=Math.min(r.right,W)-x,h=Math.min(r.bottom,H)-y;" +
-            "if(w>0&&h>0&&w*h>ba){ba=w*h;b={s:e.currentSrc||e.src||'',x:x,y:y,w:w,h:h,iw:W};}});" +
+            "var cx=r.left,cy=r.top,cw=r.width,ch=r.height;" +
+            "if(e.tagName=='IMG'&&e.naturalWidth>0){var fit=getComputedStyle(e).objectFit;" +
+            "if(fit=='contain'||fit=='scale-down'){var sc=Math.min(r.width/e.naturalWidth,r.height/e.naturalHeight);if(fit=='scale-down')sc=Math.min(sc,1);" +
+            "cw=e.naturalWidth*sc;ch=e.naturalHeight*sc;cx=r.left+(r.width-cw)/2;cy=r.top+(r.height-ch)/2;}}" +
+            "if(cw<=0||ch<=0)return;" +
+            "var x=Math.max(cx,0),y=Math.max(cy,0),w=Math.min(cx+cw,W)-x,h=Math.min(cy+ch,H)-y;" +
+            "if(w>0&&h>0&&w*h>ba){ba=w*h;b={s:e.currentSrc||e.src||'',x:x,y:y,w:w,h:h,iw:W," +
+            "f:[(x-cx)/cw,(y-cy)/ch,(x+w-cx)/cw,(y+h-cy)/ch]};}});" +
             "if(b){b.all=[];document.querySelectorAll('img').forEach(function(e){var s=e.currentSrc||e.src;if(s&&b.all.length<300)b.all.push(s);});}" +
             "return b?JSON.stringify(b):'';})()"
         val wait = android.app.ProgressDialog(a).apply {
@@ -815,6 +822,8 @@ class Collector(private val a: MainActivity) {
             val o = try { if (str.isNullOrEmpty()) null else org.json.JSONObject(str) } catch (e: Exception) { null }
             if (o == null) { wait.dismiss(); a.toastMsg("이 페이지에서 그림을 찾지 못했어요"); return@evaluateJavascript }
             val src = o.optString("s")
+            val fr = o.optJSONArray("f")?.let { a4 -> FloatArray(4) { a4.optDouble(it, if (it < 2) 0.0 else 1.0).toFloat() } }
+                ?: floatArrayOf(0f, 0f, 1f, 1f)
             val all = HashSet<String>()
             o.optJSONArray("all")?.let { arr -> for (i in 0 until arr.length()) all.add(arr.getString(i)) }
             val k = w.width / o.optDouble("iw", 1.0)
@@ -828,10 +837,10 @@ class Collector(private val a: MainActivity) {
                 val hash = if (r == android.view.PixelCopy.SUCCESS) JobStore.dHash(bmp) else null
                 bmp.recycle()
                 Thread {
-                    val best = matchSaved(s, src, all, hash)
+                    val best = matchSaved(s, src, all, hash, fr)
                     main.post {
                         wait.dismiss()
-                        if (best == null) a.toastMsg("받은 이미지 중에 비슷한 장이 없어요")
+                        if (best == null) a.toastMsg("받은 이미지가 없어요")
                         else confirmFrom(s, best.first, best.second)
                     }
                 }.start()
@@ -845,7 +854,7 @@ class Collector(private val a: MainActivity) {
      * 3) 그 자리부터 앞뒤로 번갈아 가며 썸네일 지문 비교 — 충분히 비슷하면 바로 멈춤.
      * 지문은 받을 때 미리 계산해 둔 걸 쓰고, 없으면 계산해서 폴더에 남겨 다음엔 바로.
      */
-    private fun matchSaved(s: CollectSaves.Save, src: String, all: Set<String>, hash: Long?): Pair<Int, Int>? {
+    private fun matchSaved(s: CollectSaves.Save, src: String, all: Set<String>, hash: Long?, fr: FloatArray): Pair<Int, Int>? {
         val o = s.o
         val urls = o.optJSONArray("urls") ?: return null
         val n = urls.length()
@@ -860,10 +869,12 @@ class Collector(private val a: MainActivity) {
         val files = HashMap<Int, String>()
         o.optJSONArray("ok")?.let { arr -> for (k in 0 until arr.length()) arr.getJSONObject(k).let { files[it.getInt("i")] = it.getString("f") } }
         if (files.isEmpty()) return null
+        // 그림 일부만 화면에 보이면 받은 그림도 같은 부분만 잘라 비교 (미리 계산한 지문은 전체 그림용)
+        val whole = fr[0] < 0.02f && fr[1] < 0.02f && fr[2] > 0.98f && fr[3] > 0.98f
         val known = HashMap<Int, Long>()
-        o.optJSONObject("dh")?.let { h -> h.keys().forEach { k -> k.toIntOrNull()?.let { i -> known[i] = h.optLong(k) } } }
+        if (whole) o.optJSONObject("dh")?.let { h -> h.keys().forEach { k -> k.toIntOrNull()?.let { i -> known[i] = h.optLong(k) } } }
         val cacheFile = java.io.File(dir, "thumbhash.json")
-        try { org.json.JSONObject(cacheFile.readText()).let { h -> h.keys().forEach { k -> k.toIntOrNull()?.let { i -> known.putIfAbsent(i, h.optLong(k)) } } } } catch (e: Exception) {}
+        if (whole) try { org.json.JSONObject(cacheFile.readText()).let { h -> h.keys().forEach { k -> k.toIntOrNull()?.let { i -> known.putIfAbsent(i, h.optLong(k)) } } } } catch (e: Exception) {}
         if (anchor < 0) anchor = files.keys.max()
         var best = -1
         var bestD = 65
@@ -876,7 +887,7 @@ class Collector(private val a: MainActivity) {
             step++
             if (anchor - (step + 1) / 2 < -1 && anchor + step / 2 > n) break
             val f = files[i] ?: continue
-            val h = known[i] ?: smallHash(java.io.File(dir, f))?.also { known[i] = it; added = true } ?: continue
+            val h = known[i] ?: smallHash(java.io.File(dir, f), fr)?.also { known[i] = it; if (whole) added = true } ?: continue
             checked++
             val d = java.lang.Long.bitCount(h xor hash)
             if (d < bestD) { bestD = d; best = i }
@@ -886,17 +897,29 @@ class Collector(private val a: MainActivity) {
         if (added) try {
             cacheFile.writeText(org.json.JSONObject().also { j -> known.forEach { (i, h) -> j.put(i.toString(), h) } }.toString())
         } catch (e: Exception) {}
-        if (best < 0 || bestD > 20) return null
+        // 확실하지 않아도 가장 비슷한 장을 보여주고 ◀ ▶로 고르게 함
+        if (best < 0) return files.keys.max() to 0
         return best to ((64 - bestD) * 100 / 64)
     }
 
-    private fun smallHash(f: java.io.File): Long? = try {
+    private fun smallHash(f: java.io.File, fr: FloatArray = floatArrayOf(0f, 0f, 1f, 1f)): Long? = try {
         val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
         android.graphics.BitmapFactory.decodeFile(f.path, o)
         var sample = 1
-        while (o.outWidth / (sample * 2) >= 48 && o.outHeight / (sample * 2) >= 48) sample *= 2
+        while (o.outWidth / (sample * 2) >= 96 && o.outHeight / (sample * 2) >= 96) sample *= 2
         android.graphics.BitmapFactory.decodeFile(f.path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
-            ?.let { val h = JobStore.dHash(it); it.recycle(); h }
+            ?.let { b ->
+                val x0 = (fr[0].coerceIn(0f, 1f) * b.width).toInt()
+                val y0 = (fr[1].coerceIn(0f, 1f) * b.height).toInt()
+                val x1 = (fr[2].coerceIn(0f, 1f) * b.width).toInt().coerceAtLeast(x0 + 1).coerceAtMost(b.width)
+                val y1 = (fr[3].coerceIn(0f, 1f) * b.height).toInt().coerceAtLeast(y0 + 1).coerceAtMost(b.height)
+                val c = if (x0 == 0 && y0 == 0 && x1 == b.width && y1 == b.height) b
+                    else android.graphics.Bitmap.createBitmap(b, x0, y0, x1 - x0, y1 - y0)
+                val h = JobStore.dHash(c)
+                if (c !== b) c.recycle()
+                b.recycle()
+                h
+            }
     } catch (e: Throwable) { null }
 
     /** 찾은 받은 이미지를 크게 보여주며 확인 (◀ ▶로 앞뒤 장 바꿔 고를 수 있음) */
@@ -942,7 +965,7 @@ class Collector(private val a: MainActivity) {
         var dlg: android.app.AlertDialog? = null
         fun show() {
             val n = idx[pos]
-            label.text = "받은 이미지 ${n + 1}번" + if (n == start) " · 지금 화면과 ${sim}% 비슷" else ""
+            label.text = "받은 이미지 ${n + 1}번" + if (n == start) (if (sim >= 70) " · 지금 화면과 ${sim}% 비슷" else " · 확실하지 않아요, ◀ ▶로 골라 주세요") else ""
             dlg?.getButton(android.app.AlertDialog.BUTTON_POSITIVE)?.text = "${n + 1}번부터 새로 받기"
             img.setImageDrawable(null)
             val f = files[n] ?: return

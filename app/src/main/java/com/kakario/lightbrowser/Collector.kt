@@ -146,7 +146,7 @@ class Collector(private val a: MainActivity) {
         if (!accept.contains("image") && !imgPath.containsMatchIn(req.url.path ?: "")) return null
         if (g.headers.size < 8000) g.headers.putIfAbsent(url, HashMap(req.requestHeaders))
         jobs.firstOrNull { it.grab === g }?.lastNetAt = SystemClock.uptimeMillis()
-        if (g.captured.containsKey(url)) return null
+        // 같은 주소도 매번 대신 받음: 같은 주소에 다른 그림이 오는 사이트에서 원본을 잡기 위해
         return JobStore.interceptImage(g, url, req.requestHeaders)
     }
 
@@ -431,7 +431,8 @@ class Collector(private val a: MainActivity) {
                         bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, out)
                         bmp.recycle()
                         val jpg = out.toByteArray()
-                        main.post { shotTaken(j, g, src, already, tapAt, hash, jpg) }
+                        val orig = if (already) JobStore.bestOriginal(g, hash) else null
+                        main.post { shotTaken(j, g, src, already, tapAt, hash, jpg, orig) }
                     }.start()
                 }, main)
             } catch (e: Throwable) {
@@ -440,7 +441,8 @@ class Collector(private val a: MainActivity) {
         }, 350)
     }
 
-    private fun shotTaken(j: Job, g: GrabJob, src: String, already: Boolean, tapAt: Long, hash: Long, jpg: ByteArray) {
+    private fun shotTaken(j: Job, g: GrabJob, src: String, already: Boolean, tapAt: Long, hash: Long, jpg: ByteArray,
+                          orig: GrabJob.Recent?) {
         val near = j.shotHashes.any { java.lang.Long.bitCount(it xor hash) <= 10 }
         j.shotHashes.add(hash)
         if (!already) {
@@ -455,8 +457,9 @@ class Collector(private val a: MainActivity) {
         j.autoRetries = 0
         j.sigOnly = 0
         scheduleSave(j)
-        log(j, "주소는 그대로인데 화면 그림이 바뀜 → 화면을 그대로 저장 (${j.found.size}번째)")
-        JobStore.addBytes(g, jpg, "jpg", fillSlot(j))
+        log(j, "주소는 그대로인데 화면 그림이 바뀜 → " + (if (orig != null) "페이지가 받은 원본 화질로" else "화면 캡처로") +
+            " 저장 (${j.found.size}번째)")
+        if (orig != null) JobStore.addBytes(g, orig.bytes, orig.ext, fillSlot(j)) else JobStore.addBytes(g, jpg, "jpg", fillSlot(j))
     }
 
     /**

@@ -46,6 +46,9 @@ class GrabJob(val id: Long, var title: String, val dir: File, val referer: Strin
     internal val dupOf = HashMap<Int, Int>()        // 중복 칸 → 원래 칸
     /** 화면에 실제로 보였던 그림 (주소 → 그림 지문, 화면 캡처 jpg) — 받은 파일과 비교 */
     val expect = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, ByteArray>>()
+    /** 페이지가 최근에 불러온 그림 원본들 (화면 그림과 같은 원본을 찾을 때 씀) */
+    class Recent(val url: String, val bytes: ByteArray, val ext: String) { @Volatile var hash: Long? = null }
+    val recent = java.util.concurrent.ConcurrentLinkedDeque<Recent>()
     internal val fixed = sortedSetOf<Int>()         // 받은 그림이 화면과 달라서 화면 캡처로 바꾼 칸
     /** 작업 기록 (넘기기·실패 상세). 여러 스레드에서 씀 */
     val log = StringBuffer()
@@ -776,9 +779,10 @@ object JobStore {
                 if (!dup) j.addLog("${i + 1}번 화면과 같음 확인 (차이 $dist)")
                 return@execute
             }
-            // 화면에 보였던 그림과 다름 → 화면 캡처를 그 장으로 저장
-            val nf = File(j.dir, (i + 1).toString().padStart(4, '0') + "_screen.jpg")
-            val ok = runCatching { FileOutputStream(nf).use { it.write(e.second) } }.isSuccess
+            // 화면에 보였던 그림과 다름 → 페이지가 받은 원본 중 화면과 같은 걸 찾고, 없으면 화면 캡처로
+            val orig = bestOriginal(j, e.first)
+            val nf = File(j.dir, (i + 1).toString().padStart(4, '0') + (if (orig != null) "_page." + orig.ext else "_screen.jpg"))
+            val ok = runCatching { FileOutputStream(nf).use { it.write(orig?.bytes ?: e.second) } }.isSuccess
             main.post {
                 if (!ok || j.canceled || i >= j.slots.size) return@post
                 if (dup) {
@@ -791,13 +795,34 @@ object JobStore {
                 j.fixed.add(i)
                 j.pics.clear()
                 j.slots.forEach { p -> if (p != null) j.pics.add(p) }
-                j.addLog("${i + 1}번 받은 그림이 화면과 달라서(차이 $dist) 화면 캡처로 바꿈" +
+                j.addLog("${i + 1}번 받은 그림이 화면과 달라서(차이 $dist) " + (if (orig != null) "원본 화질 그림으로" else "화면 캡처로") + " 바꿈" +
                     (if (dup) " · 중복으로 버렸던 장" else "") + "\n          $url")
                 updateStatus(j)
                 changed(j)
             }
         }
     }
+
+    /** 페이지가 최근 불러온 원본 중 화면 그림(지문)과 같은 것 (아무 스레드) */
+    fun bestOriginal(j: GrabJob, hash: Long): GrabJob.Recent? {
+        var best: GrabJob.Recent? = null
+        var bestD = 11
+        for (r in j.recent.descendingIterator()) {
+            val h = r.hash ?: dHashBytes(r.bytes)?.also { r.hash = it } ?: continue
+            val d = java.lang.Long.bitCount(h xor hash)
+            if (d < bestD) { bestD = d; best = r }
+        }
+        return best
+    }
+
+    private fun dHashBytes(b: ByteArray): Long? = try {
+        val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(b, 0, b.size, o)
+        var sample = 1
+        while (o.outWidth / (sample * 2) >= 64 && o.outHeight / (sample * 2) >= 64) sample *= 2
+        android.graphics.BitmapFactory.decodeByteArray(b, 0, b.size, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+            ?.let { val h = dHash(it); it.recycle(); h }
+    } catch (e: Throwable) { null }
 
     /** 그림 지문(dHash 64비트): 크기·화질이 달라도 같은 그림이면 비슷하게 나옴 */
     fun dHash(b: android.graphics.Bitmap): Long {
@@ -878,6 +903,13 @@ object JobStore {
                 val f = File(dir, "c" + System.nanoTime())
                 FileOutputStream(f).use { it.write(bytes) }
                 j.captured.putIfAbsent(url, f)
+                // 최근 원본으로도 보관 (같은 주소에 다른 그림이 와도 원본 화질로 저장할 수 있게)
+                val ext = when {
+                    type.contains("png") -> "png"; type.contains("webp") -> "webp"; type.contains("gif") -> "gif"
+                    type.contains("avif") -> "avif"; else -> "jpg"
+                }
+                j.recent.addLast(GrabJob.Recent(url, bytes, ext))
+                while (j.recent.size > 15) j.recent.pollFirst()
             }
             val mime = type.substringBefore(';').trim().ifEmpty { "image/*" }
             val charset = Regex("charset=([^;]+)", RegexOption.IGNORE_CASE).find(type)?.groupValues?.get(1)

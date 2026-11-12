@@ -544,6 +544,7 @@ object JobStore {
             }
         }
         o.optJSONArray("dups")?.let { a -> for (k in 0 until a.length()) j.dupSlots.add(a.getInt(k)) }
+        runCatching { File(dir, "log.txt").takeIf { it.exists() }?.readText()?.let { j.log.append(it).append("---- 저장한 작업 다시 열기 ----\n") } }
         o.optJSONObject("dh")?.let { h -> h.keys().forEach { k -> k.toIntOrNull()?.let { i -> j.dhash[i] = h.optLong(k) } } }
         o.optJSONObject("hashes")?.let { h -> h.keys().forEach { k -> j.hashes[k] = h.optInt(k) } }
         j.slots.forEach { p -> if (p != null) j.pics.add(p) }

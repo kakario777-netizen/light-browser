@@ -79,12 +79,16 @@ object CollectSaves {
         o.put("found", JSONArray(found.toList()))
         val text = o.toString()
         val id = g.id
+        val logText = g.log.toString()
+        val logFile = File(g.dir, "log.txt")
         Thread {
             synchronized(this) {
                 if (id in gone) return@Thread
                 val tmp = File(dir, "$id.tmp")
                 tmp.writeText(text)
                 tmp.renameTo(File(dir, "$id.json"))
+                // 작업 기록도 같이 남김 (앱을 껐다 켜도 '기록'에서 볼 수 있게)
+                runCatching { logFile.writeText(logText) }
             }
         }.start()
     }

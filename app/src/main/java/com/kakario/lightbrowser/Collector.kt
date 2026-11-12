@@ -719,12 +719,16 @@ class Collector(private val a: MainActivity) {
         val host = Uri.parse(a.currentWebView()?.url ?: "").host
         val same = if (hereOk() && host != null) list.firstOrNull { Uri.parse(it.page).host == host } else null
         if (same != null) {
+            val acts = listOf<Pair<String, () -> Unit>>(
+                "여기서부터 이어 받기\n이미 받은 장은 건너뛰고 못 받은 장만 채워요" to { resumeSaved(same, here = true) },
+                "이 페이지부터 새로 받기\n받은 이미지 중 같은 장을 찾아 보여주고, 그 장부터 다시 받아요" to { findHere(same) },
+                "다른 저장 작업 고르기" to { pickSaved(list, "넘기며 모으기", newOption = true) },
+                "새 작업으로 모으기" to { begin() },
+            )
             android.app.AlertDialog.Builder(a)
-                .setTitle("여기서부터 이어 받으시겠어요?")
-                .setMessage("'${same.title}' (${same.count}장 받아 둠)\n\n지금 보는 페이지부터 이어서 넘겨요. 이미 받은 장은 알아서 건너뛰고, 못 받았던 장만 채워요.")
-                .setPositiveButton("여기서부터 이어 받기") { _, _ -> resumeSaved(same, here = true) }
-                .setNeutralButton("다른 선택") { _, _ -> pickSaved(list, "넘기며 모으기", newOption = true) }
-                .setNegativeButton("새로 모으기") { _, _ -> begin() }
+                .setTitle("'${same.title}' (${same.count}장 받아 둠)")
+                .setItems(acts.map { it.first }.toTypedArray()) { _, w -> acts[w].second() }
+                .setNegativeButton("닫기", null)
                 .show()
             return
         }

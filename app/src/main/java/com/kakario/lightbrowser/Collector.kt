@@ -62,6 +62,9 @@ class Collector(private val a: MainActivity) {
         var lastPics = 0
         var catchingUp = false  // 저장한 데서 이어 받는 중: 이미 받은 장은 건너뛰며 따라잡기
         var sigOnly = 0         // 새 주소 없이 화면만 바뀐 횟수 (연속)
+        val foundNorm = HashSet<String>()   // 주소 꼬리를 뗀 그림 파일 주소
+        var lastGrabAt = 0L     // 주소 없는 그림을 마지막으로 꺼낸 때
+        var grabbing = false
         val saver = Runnable { saveNow(this) }
         var goodMethod = -1     // 이 사이트에서 통한 넘기기 방법
         var lastMethod = 0
@@ -316,13 +319,18 @@ class Collector(private val a: MainActivity) {
 
     /** 화면에 크게 보이는 이미지 주소를 모으고, 새로 찾은 건 바로 받기 시작 */
     private fun snap(j: Job, after: (() -> Unit)? = null) {
-        val js = "(function(){var o=[],W=innerWidth,H=innerHeight;" +
-            "function big(r){return r.width*r.height>W*H*0.12&&r.bottom>0&&r.top<H&&r.right>0&&r.left<W;}" +
-            "document.querySelectorAll('img').forEach(function(i){var r=i.getBoundingClientRect();" +
-            "var s=i.currentSrc||i.src;if(s&&big(r))o.push(s);});" +
-            "try{document.elementsFromPoint(W/2,H/2).forEach(function(e){var r=e.getBoundingClientRect();if(!big(r))return;" +
+        // 화면에 가장 크게 보이는 그림(들)만 고름: 옆의 배경·광고·안내 그림을 잘못 집지 않게
+        // 주소가 없는 그림(blob·data·canvas)은 'grab:번호'로 표시해 두고 따로 꺼냄
+        val js = "(function(){var o=[],c=[],W=innerWidth,H=innerHeight;" +
+            "function area(r){var w=Math.min(r.right,W)-Math.max(r.left,0),h=Math.min(r.bottom,H)-Math.max(r.top,0);return w>0&&h>0?w*h:0;}" +
+            "document.querySelectorAll('img,canvas').forEach(function(e){var A=area(e.getBoundingClientRect());if(A<W*H*0.12)return;" +
+            "if(e.tagName=='CANVAS')c.push({a:A,e:e,s:'canvas'});else{var s=e.currentSrc||e.src;if(s)c.push({a:A,e:e,s:s});}});" +
+            "try{document.elementsFromPoint(W/2,H/2).forEach(function(e){var A=area(e.getBoundingClientRect());if(A<W*H*0.12)return;" +
             "var b=getComputedStyle(e).backgroundImage;var m=b&&b.match(/url\\([\"']?([^\"')]+)/);" +
-            "if(m)o.push(new URL(m[1],location.href).href);});}catch(e){}" +
+            "if(m)c.push({a:A,e:null,s:new URL(m[1],location.href).href});});}catch(e){}" +
+            "var mx=0;c.forEach(function(x){if(x.a>mx)mx=x.a;});window.__lbG=[];" +
+            "c.forEach(function(x){if(x.a<mx*0.5)return;if(/^https?:/.test(x.s))o.push(x.s);" +
+            "else if(x.e){window.__lbG.push(x.e);o.push('grab:'+(window.__lbG.length-1)+':'+(x.s.indexOf('data:')==0?'data':x.s));}});" +
             "o.push('sig:'+location.href+'|'+o.join('|'));return JSON.stringify(o);})()"
         j.wv.evaluateJavascript(js) { res ->
             try {
@@ -340,7 +348,12 @@ class Collector(private val a: MainActivity) {
                                 log(j, "새 주소 없이 화면만 바뀜 (${j.sigOnly}번째 연속) · 이미 받은 장이면 건너뜀")
                             }
                             j.lastSig = u
+                        } else if (u.startsWith("grab:")) {
+                            grabPixels(j, u)
                         } else if (u.startsWith("http")) {
+                            // 같은 그림 파일인데 주소 뒤 꼬리(?...)만 바뀐 건 같은 걸로 봄
+                            val norm = Uri.parse(u).let { p -> if (imgPath.containsMatchIn(p.path ?: "")) (p.host + p.path) else u }
+                            if (norm != u && !j.foundNorm.add(norm)) continue
                             if (j.found.add(u)) {
                                 j.lastNewAt = SystemClock.uptimeMillis()
                                 j.autoRetries = 0
@@ -349,8 +362,6 @@ class Collector(private val a: MainActivity) {
                                 log(j, "새 이미지 ${j.found.size}번째 찾음 (${where(j)}) $u")
                                 j.grab?.let { g -> if (j.running) JobStore.add(g, u) }
                             }
-                        } else if (u.startsWith("blob:") || u.startsWith("data:")) {
-                            j.skipped++
                         }
                     }
                 }
@@ -362,6 +373,61 @@ class Collector(private val a: MainActivity) {
                 if (barFor === j) barText?.text = j.text
             }
             after?.invoke()
+        }
+    }
+
+    /**
+     * 주소가 없는 그림(blob·data 이미지, canvas): 페이지 안에서 그림 내용을 직접 꺼내 저장.
+     * blob 주소는 그림마다 달라서 이미 꺼낸 건 건너뛰고, canvas는 내용 지문으로 새 그림인지 판단.
+     */
+    private fun grabPixels(j: Job, tag: String) {
+        val g = j.grab ?: return
+        if (!j.running || j.grabbing) return
+        val parts = tag.split(":", limit = 3)
+        val k = parts.getOrNull(1)?.toIntOrNull() ?: return
+        val src = parts.getOrNull(2) ?: ""
+        if (src.startsWith("blob:") && j.found.contains(src)) return
+        val now = SystemClock.uptimeMillis()
+        // canvas·data는 매번 꺼내면 무거우니 넘긴 뒤에만, 너무 자주는 말고
+        if (!src.startsWith("blob:") && (now - j.lastGrabAt < 1200 || (j.lastTapAt > 0 && j.lastGrabAt > j.lastTapAt + 2500))) return
+        j.grabbing = true
+        j.lastGrabAt = now
+        val js = "(function(k){var e=window.__lbG&&window.__lbG[k];if(!e)return '';try{" +
+            "if(e.tagName=='CANVAS')return e.toDataURL('image/png');var s=e.currentSrc||e.src;if(s.indexOf('data:')==0)return s;" +
+            "if(!e.naturalWidth)return '';var cv=document.createElement('canvas');cv.width=e.naturalWidth;cv.height=e.naturalHeight;" +
+            "cv.getContext('2d').drawImage(e,0,0);return cv.toDataURL('image/jpeg',0.95);}catch(x){return 'ERR:'+x;}})(" + k + ")"
+        j.wv.evaluateJavascript(js) { res ->
+            val data = try { JSONTokener(res).nextValue() as? String } catch (e: Exception) { null } ?: ""
+            if (data.startsWith("ERR:")) {
+                j.grabbing = false
+                if (j.skipped++ < 3) log(j, "주소 없는 그림을 꺼내지 못함 (사이트가 막음) · ${data.take(120)}")
+                return@evaluateJavascript
+            }
+            if (!data.startsWith("data:image")) { j.grabbing = false; return@evaluateJavascript }
+            val ext = when {
+                data.startsWith("data:image/png") -> "png"
+                data.startsWith("data:image/webp") -> "webp"
+                data.startsWith("data:image/gif") -> "gif"
+                else -> "jpg"
+            }
+            Thread {
+                val bytes = try { android.util.Base64.decode(data.substringAfter(','), android.util.Base64.DEFAULT) } catch (e: Exception) { null }
+                val key = bytes?.let { b ->
+                    "pix:" + java.security.MessageDigest.getInstance("MD5").digest(b).joinToString("") { "%02x".format(it) }
+                }
+                main.post {
+                    j.grabbing = false
+                    if (bytes == null || key == null || bytes.size < 2000 || !j.running) return@post
+                    if (src.startsWith("blob:")) j.found.add(src)
+                    if (!j.found.add(key)) return@post
+                    j.lastNewAt = SystemClock.uptimeMillis()
+                    j.autoRetries = 0
+                    j.sigOnly = 0
+                    scheduleSave(j)
+                    log(j, "주소 없는 그림 꺼냄 ${j.found.size}번째 (${if (src.startsWith("blob:")) "blob" else src}) · ${bytes.size / 1024}KB")
+                    JobStore.addBytes(g, bytes, ext)
+                }
+            }.start()
         }
     }
 

@@ -482,6 +482,11 @@ object JobStore {
         j.fails = j.failed.size
         j.state = GrabJob.COLLECTING
         val missing = j.slots.indices.filter { j.slots[it] == null && it !in j.failed && it !in j.dupSlots }
+            .filter { i ->
+                // 페이지에서 직접 꺼낸 그림은 다시 받을 주소가 없음 → 실패로
+                if (urls[i].startsWith("http")) true else { j.failed.add(i); j.failReason[i] = -1; j.failCodes[-1] = (j.failCodes[-1] ?: 0) + 1; false }
+            }
+        j.fails = j.failed.size
         j.done = j.total - missing.size
         j.addLog("저장해 둔 작업 다시 불러옴 · 받은 ${j.pics.size}장 · 다시 받을 ${missing.size}장")
         updateStatus(j)
@@ -506,6 +511,21 @@ object JobStore {
         j.urls = j.urls + url
         j.total = j.slots.size
         fetch(j, i, url, attempt = 1)
+    }
+
+    /** 페이지에서 직접 꺼낸 그림(주소 없는 그림)을 바로 저장 (메인 스레드) */
+    fun addBytes(j: GrabJob, bytes: ByteArray, ext: String) {
+        if (j.canceled) return
+        val i = j.slots.size
+        val tag = "page-image-${i + 1}.$ext"
+        j.slots.add(null)
+        j.urls = j.urls + tag
+        j.total = j.slots.size
+        pool.execute {
+            val f = fileFor(j, i, tag)
+            val ok = runCatching { FileOutputStream(f).use { it.write(bytes) } }.isSuccess
+            main.post { fetched(j, i, tag, f, ok, if (ok) 200 else -1) }
+        }
     }
 
     /** 실패한 것만 다시 받기 */

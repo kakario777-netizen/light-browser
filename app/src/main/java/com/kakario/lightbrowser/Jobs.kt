@@ -772,7 +772,12 @@ object JobStore {
         if (ok) {
             val h = hashOf(f)
             val same = h?.let { j.hashes[it] }
-            if (same != null && same != i) {
+            // 바로 앞 몇 장과 똑같으면 '안 넘어간 것' → 건너뜀.
+            // 멀리 떨어진 장과 똑같은 건 작품에 같은 그림이 다시 나오는 것(차분·반복 장면) → 그대로 저장
+            if (same != null && same != i && i - same > 5) {
+                j.addLog("${i + 1}번은 ${same + 1}번과 똑같은 그림이지만 멀리 떨어져 있어 그대로 저장 (작품 안 반복 장면)")
+            }
+            if (same != null && same != i && i - same in 1..5) {
                 // 주소는 달라도 이미 받은 그림과 똑같음 → 지우고 건너뜀 (넘기기가 실제로 안 됐을 수 있음)
                 f.delete()
                 j.dupSlots.add(i)

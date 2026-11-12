@@ -51,12 +51,50 @@ object AdBlock {
         "div[id*=\"taboola\"]", "div[id^=\"mobon\"]", "a[href*=\"mobon.net\"]", "a[href*=\"realclick\"]",
     )
 
+    /** 앱 업데이트 없이 받은 최신 목록이 있으면 그걸, 없으면 앱에 들어 있는 목록 */
+    private fun open(ctx: Context, name: String): java.io.InputStream {
+        val f = java.io.File(ctx.filesDir, "adblock/$name")
+        return if (f.exists() && f.length() > 0) f.inputStream() else ctx.assets.open("adblock/$name")
+    }
+
+    /**
+     * 광고 차단 목록만 따로 갱신 (앱 업데이트 없이, 하루에 한 번).
+     * 서버(GitHub)가 매일 새 목록을 만들어 'filters' 릴리스에 올려 둠.
+     */
+    fun refresh(ctx: Context, st: Store) {
+        if (System.currentTimeMillis() - st.lastFilterCheck < 24 * 3600_000L) return
+        st.lastFilterCheck = System.currentTimeMillis()
+        val app = ctx.applicationContext
+        Thread {
+            try {
+                val dir = java.io.File(app.filesDir, "adblock").apply { mkdirs() }
+                val got = ArrayList<Pair<java.io.File, java.io.File>>()
+                for (name in listOf("hosts.txt", "cosmetic.txt")) {
+                    val c = java.net.URL("https://github.com/kakario777-netizen/light-browser/releases/download/filters/$name.gz")
+                        .openConnection() as java.net.HttpURLConnection
+                    c.connectTimeout = 15000
+                    c.readTimeout = 60000
+                    if (c.responseCode != 200) { c.disconnect(); return@Thread }
+                    val tmp = java.io.File(dir, "$name.tmp")
+                    java.util.zip.GZIPInputStream(c.inputStream).use { ins -> tmp.outputStream().use { ins.copyTo(it) } }
+                    c.disconnect()
+                    if (tmp.length() < 1000) return@Thread
+                    got.add(tmp to java.io.File(dir, name))
+                }
+                got.forEach { (t, f) -> t.renameTo(f) }
+                loaded = false
+                load(app)
+            } catch (e: Exception) {
+            }
+        }.start()
+    }
+
     fun load(ctx: Context) {
         if (loaded) return
         Thread {
             val h = HashSet<String>(builtin)
             try {
-                ctx.assets.open("adblock/hosts.txt").bufferedReader().useLines { lines ->
+                open(ctx, "hosts.txt").bufferedReader().useLines { lines ->
                     lines.forEach { if (it.isNotBlank()) h.add(it.trim()) }
                 }
             } catch (e: Exception) {
@@ -64,7 +102,7 @@ object AdBlock {
             val gen = ArrayList<String>(baseHide)
             val site = HashMap<String, MutableList<String>>()
             try {
-                ctx.assets.open("adblock/cosmetic.txt").bufferedReader().useLines { lines ->
+                open(ctx, "cosmetic.txt").bufferedReader().useLines { lines ->
                     lines.forEach { line ->
                         val tab = line.indexOf('\t')
                         if (tab < 0) return@forEach

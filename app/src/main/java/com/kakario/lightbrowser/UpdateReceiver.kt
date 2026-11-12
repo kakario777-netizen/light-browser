@@ -32,10 +32,13 @@ class InstallResultReceiver : BroadcastReceiver() {
     }
 }
 
-/** 업데이트가 끝나면 앱을 다시 열어 줌 (막히면 알림으로) */
+/** 업데이트가 끝나면: 사용자가 '지금 업데이트'를 눌렀을 때만 앱을 다시 열어 줌 (앱 나갈 때 한 업데이트는 조용히) */
 class UpdatedReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_MY_PACKAGE_REPLACED) return
+        val p = ctx.getSharedPreferences("browser", Context.MODE_PRIVATE)
+        if (!p.getBoolean("relaunchAfterUpdate", true)) return
+        p.edit().putBoolean("relaunchAfterUpdate", false).apply()
         val open = Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         try { ctx.startActivity(open) } catch (e: Exception) {}
         try {
@@ -50,6 +53,7 @@ class UpdatedReceiver : BroadcastReceiver() {
                 .setContentText("눌러서 열기")
                 .setContentIntent(pi)
                 .setAutoCancel(true)
+                .setTimeoutAfter(60_000)
                 .build())
         } catch (e: Exception) {}
     }

@@ -263,6 +263,9 @@ class MainActivity : Activity() {
     override fun onStop() {
         super.onStop()
         if (::collector.isInitialized) collector.saveAll()
+        if (::updater.isInitialized && ::collector.isInitialized) {
+            updater.installOnLeave(busy = collector.hasJobs() || JobStore.activeCount() > 0)
+        }
         // 넘기며 모으는 중이면 페이지를 미니 창으로 옮겨서 계속 움직이게 함
         if (::collector.isInitialized && collector.hasJobs() && mini.canUse()) {
             val labels = collector.miniLabels()
@@ -528,6 +531,7 @@ class MainActivity : Activity() {
         parking = FrameLayout(this)
         updater = Updater(this)
         frame.postDelayed({ updater.autoCheck() }, 3000)
+        frame.postDelayed({ AdBlock.refresh(this, store) }, 8000)
         frame.postDelayed({ if (::collector.isInitialized) collector.askSavedOnStart() }, 1500)
         frame.addView(parking, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         frame.addView(root, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))

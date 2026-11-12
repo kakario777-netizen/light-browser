@@ -87,6 +87,7 @@ class Updater(private val a: MainActivity) {
                         .setMessage(err ?: "").setPositiveButton("확인", null).show()
                     r.build <= myBuild() || r.apkUrl.isEmpty() -> if (!silent) a.toastMsg("최신 버전이에요 (빌드 ${myBuild()})")
                     r.build == a.store.skipBuild && silent -> {}
+                    silent -> quietDownload(r)
                     else -> offer(r)
                 }
             }
@@ -169,8 +170,52 @@ class Updater(private val a: MainActivity) {
 
     private var pendingApk: File? = null
 
+    /** 앱을 나갈 때 설치할 준비된 업데이트 */
+    var readyApk: File? = null
+        private set
+
+    /** 자동 확인: 몰래 받아 두고, 다 받으면 짧게 물어봄 (지금 / 앱 나갈 때) */
+    private fun quietDownload(r: Release) {
+        val dir = File(a.cacheDir, "updates").apply { mkdirs() }
+        val f = File(dir, "light-browser-${r.build}.apk")
+        Thread {
+            val ok = try {
+                dir.listFiles()?.forEach { if (it != f) it.delete() }
+                if (!(f.exists() && r.size > 0 && f.length() == r.size)) {
+                    val c = URL(r.apkUrl).openConnection() as HttpURLConnection
+                    c.connectTimeout = 20000
+                    c.readTimeout = 60000
+                    if (c.responseCode != 200) throw Exception()
+                    c.inputStream.use { ins -> FileOutputStream(f).use { ins.copyTo(it, 128 * 1024) } }
+                    c.disconnect()
+                }
+                f.length() > 0
+            } catch (e: Exception) { false }
+            main.post {
+                if (!ok || a.isFinishing) return@post
+                readyApk = f
+                val notes = r.notes.substringAfter("변경 내용:", r.notes).trim().lines().firstOrNull()?.take(120) ?: ""
+                AlertDialog.Builder(a)
+                    .setTitle("새 버전 준비됨 (빌드 ${r.build})")
+                    .setMessage((if (notes.isNotBlank()) "$notes\n\n" else "") + "지금 업데이트하면 앱이 잠깐 껐다 켜져요.\n'나중에'를 누르면 앱을 나갈 때 알아서 업데이트해요.")
+                    .setPositiveButton("지금 업데이트") { _, _ -> install(f, relaunch = true) }
+                    .setNegativeButton("나중에", null)
+                    .show()
+            }
+        }.start()
+    }
+
+    /** 앱을 나갈 때: 받아 둔 업데이트가 있고 하는 작업이 없으면 조용히 설치 */
+    fun installOnLeave(busy: Boolean) {
+        val f = readyApk ?: return
+        if (busy || !f.exists() || !a.packageManager.canRequestPackageInstalls()) return
+        readyApk = null
+        install(f, relaunch = false)
+    }
+
     /** 설치 화면 띄우기 (처음 한 번은 '이 출처 허용'이 필요) */
-    fun install(f: File) {
+    fun install(f: File, relaunch: Boolean = true) {
+        a.store.relaunchAfterUpdate = relaunch
         if (!a.packageManager.canRequestPackageInstalls()) {
             pendingApk = f
             AlertDialog.Builder(a)
@@ -209,7 +254,7 @@ class Updater(private val a: MainActivity) {
                     android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_MUTABLE)
                 s.commit(cb.intentSender)
             }
-            a.toastMsg("업데이트 설치 중… 잠시 뒤 앱이 다시 열려요")
+            if (relaunch) a.toastMsg("업데이트 설치 중… 잠시 뒤 앱이 다시 열려요")
             return
         } catch (e: Exception) {
             // 안 되면 예전 방식(설치 화면)으로

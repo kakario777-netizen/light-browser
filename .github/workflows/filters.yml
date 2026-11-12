@@ -1,0 +1,32 @@
+name: filters
+
+# 광고 차단 목록만 매일 새로 만들어 'filters' 릴리스에 올린다 (앱 업데이트 없이 앱이 하루 한 번 받아 감)
+on:
+  schedule:
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  filters:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build lists
+        run: |
+          mkdir -p out
+          python3 tools/build_filters.py out
+          gzip -9 -k out/hosts.txt out/cosmetic.txt
+          ls -la out
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view filters >/dev/null 2>&1; then
+            gh release upload filters out/hosts.txt.gz out/cosmetic.txt.gz --clobber
+          else
+            gh release create filters out/hosts.txt.gz out/cosmetic.txt.gz --title "광고 차단 목록" \
+              --notes "앱이 하루에 한 번 받아 가는 광고 차단 목록이에요. (설치 파일 아님)" --latest=false
+          fi

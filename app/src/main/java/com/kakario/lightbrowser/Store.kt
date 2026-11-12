@@ -100,6 +100,12 @@ class Store(ctx: Context) {
     var lastUpdateCheck: Long
         get() = p.getLong("lastUpdateCheck", 0L)
         set(v) = p.edit().putLong("lastUpdateCheck", v).apply()
+    var relaunchAfterUpdate: Boolean
+        get() = p.getBoolean("relaunchAfterUpdate", true)
+        set(v) = p.edit().putBoolean("relaunchAfterUpdate", v).commit().let { }
+    var lastFilterCheck: Long
+        get() = p.getLong("lastFilterCheck", 0L)
+        set(v) = p.edit().putLong("lastFilterCheck", v).apply()
     var skipBuild: Int
         get() = p.getInt("skipBuild", 0)
         set(v) = p.edit().putInt("skipBuild", v).apply()

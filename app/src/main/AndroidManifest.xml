@@ -50,6 +50,12 @@
             android:name=".BgService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <receiver android:name=".InstallResultReceiver" android:exported="false" />
+        <receiver android:name=".UpdatedReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"

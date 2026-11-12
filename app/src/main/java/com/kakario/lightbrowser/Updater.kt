@@ -188,6 +188,31 @@ class Updater(private val a: MainActivity) {
             return
         }
         pendingApk = null
+        // 앱 안에서 바로 업데이트 (안드로이드 12+: 이 앱이 설치한 뒤부터는 확인 없이도 됨)
+        try {
+            val pi = a.packageManager.packageInstaller
+            val params = android.content.pm.PackageInstaller.SessionParams(android.content.pm.PackageInstaller.SessionParams.MODE_FULL_INSTALL)
+            params.setAppPackageName(a.packageName)
+            if (android.os.Build.VERSION.SDK_INT >= 31) {
+                params.setRequireUserAction(android.content.pm.PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
+            }
+            params.setSize(f.length())
+            val id = pi.createSession(params)
+            pi.openSession(id).use { s ->
+                s.openWrite("base.apk", 0, f.length()).use { out ->
+                    f.inputStream().use { it.copyTo(out, 256 * 1024) }
+                    s.fsync(out)
+                }
+                val cb = android.app.PendingIntent.getBroadcast(a, id,
+                    Intent(a, InstallResultReceiver::class.java),
+                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_MUTABLE)
+                s.commit(cb.intentSender)
+            }
+            a.toastMsg("업데이트 설치 중… 잠시 뒤 앱이 다시 열려요")
+            return
+        } catch (e: Exception) {
+            // 안 되면 예전 방식(설치 화면)으로
+        }
         try {
             val uri = FileProvider.getUriForFile(a, a.packageName + ".files", f)
             a.startActivity(Intent(Intent.ACTION_VIEW)

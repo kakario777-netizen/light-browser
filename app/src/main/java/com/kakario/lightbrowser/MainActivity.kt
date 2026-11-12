@@ -132,6 +132,24 @@ class MainActivity : Activity() {
     private fun col(id: Int) = getColor(id)
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
     fun toastMsg(s: String) = toast(s)
+
+    /** 긴 글자는 한 줄로 두고 자동으로 흘러가게 (전광판처럼) */
+    fun marquee(tv: TextView) {
+        tv.isSingleLine = true
+        tv.ellipsize = android.text.TextUtils.TruncateAt.MARQUEE
+        tv.marqueeRepeatLimit = -1
+        tv.isSelected = true
+    }
+
+    /** 창 제목: 길면 한 줄로 자동 흘러감 */
+    fun titleView(text: CharSequence): TextView = TextView(this).apply {
+        this.text = text
+        textSize = 18f
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+        setTextColor(col(R.color.text))
+        setPadding(dp(24), dp(20), dp(24), dp(8))
+        marquee(this)
+    }
     private fun isNight() =
         (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
 
@@ -1039,7 +1057,7 @@ class MainActivity : Activity() {
         if (items.isEmpty()) return
         val title = (link ?: img ?: "").let { if (it.startsWith("data:")) "이미지" else displayUrl(it) }
         AlertDialog.Builder(this)
-            .setTitle(title.take(120))
+            .setCustomTitle(titleView(title.take(300)))
             .setItems(items.map { it.first }.toTypedArray()) { _, w -> items[w].second() }
             .show()
     }
@@ -1604,7 +1622,7 @@ class MainActivity : Activity() {
         items.forEachIndexed { i, d ->
             homeGrid.addView(dialTile(d, cell, { load(d.url) }) {
                 AlertDialog.Builder(this)
-                    .setTitle(d.title)
+                    .setCustomTitle(titleView(d.title))
                     .setItems(arrayOf("새 탭에서 열기", "수정", "삭제")) { _, which ->
                         when (which) {
                             0 -> newTab(d.url)
@@ -1887,7 +1905,7 @@ class MainActivity : Activity() {
             addView(check)
         }
         AlertDialog.Builder(this)
-            .setTitle("'${j.title}' ${j.pics.size}장 다 받았어요")
+            .setCustomTitle(titleView("'${j.title}' ${j.pics.size}장 다 받았어요"))
             .setMessage("ZIP으로 압축하고, 받은 이미지는 지울까요?\n(압축 파일은 다운로드 폴더에 저장돼요)")
             .setView(box)
             .setPositiveButton("압축하고 지우기") { _, _ ->

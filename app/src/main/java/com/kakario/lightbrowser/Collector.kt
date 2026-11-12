@@ -726,7 +726,7 @@ class Collector(private val a: MainActivity) {
                 "새 작업으로 모으기" to { begin() },
             )
             android.app.AlertDialog.Builder(a)
-                .setTitle("'${same.title}' (${same.count}장 받아 둠)")
+                .setCustomTitle(a.titleView("'${same.title}' (${same.count}장 받아 둠)"))
                 .setItems(acts.map { it.first }.toTypedArray()) { _, w -> acts[w].second() }
                 .setNegativeButton("닫기", null)
                 .show()
@@ -776,7 +776,7 @@ class Collector(private val a: MainActivity) {
                 .setNegativeButton("취소", null).show()
         })
         android.app.AlertDialog.Builder(a)
-            .setTitle("${s.title} · ${s.count}장 받아 둠")
+            .setCustomTitle(a.titleView("${s.title} · ${s.count}장 받아 둠"))
             .setItems(acts.map { it.first }.toTypedArray()) { _, w -> acts[w].second() }
             .setNegativeButton("닫기", null)
             .show()

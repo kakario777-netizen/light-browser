@@ -98,6 +98,7 @@ class Pages(private val a: MainActivity) {
             text = title
             textSize = 16f
             setTextColor(a.getColor(R.color.text))
+            a.marquee(this)
         })
         var subView: TextView? = null
         if (sub != null) {
@@ -431,7 +432,7 @@ class Pages(private val a: MainActivity) {
                     "받은 ${s.count}장" + (if (extra.isNotEmpty()) " · $extra" else "") + " · ${fmt.format(java.util.Date(s.savedAt))} 저장\n멈춘 곳: $page",
                     null) {
                     android.app.AlertDialog.Builder(a)
-                        .setTitle(s.title)
+                        .setCustomTitle(a.titleView(s.title))
                         .setItems(arrayOf("받은 이미지 보기 (${s.count}장)", "이어 받기 · 정리 · 버리기")) { _, w ->
                             if (w == 0) {
                                 val g = JobStore.peek(s)
@@ -453,7 +454,7 @@ class Pages(private val a: MainActivity) {
             paused.forEach { c ->
                 row(body, c.title, c.status, null) {
                     android.app.AlertDialog.Builder(a)
-                        .setTitle(c.title)
+                        .setCustomTitle(a.titleView(c.title))
                         .setItems(arrayOf("그 탭으로 가기", "이어 넘기기", "여기까지로 끝")) { _, w ->
                             back()
                             when (w) { 0 -> c.goTo(); 1 -> { c.goTo(); c.resume() }; else -> c.end() }

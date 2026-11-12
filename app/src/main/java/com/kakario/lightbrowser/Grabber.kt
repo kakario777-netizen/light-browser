@@ -452,6 +452,7 @@ class Grabber(private val a: MainActivity) {
         right.addView(listBtn)
         val (head, t) = header(j.title, { closeView() }, right)
         titleText = t
+        a.marquee(t)
         box.addView(head)
 
         statusText = TextView(a).apply {
@@ -709,7 +710,7 @@ class Grabber(private val a: MainActivity) {
 
     private fun askRemove(j: GrabJob) {
         AlertDialog.Builder(a)
-            .setTitle(j.title)
+            .setCustomTitle(a.titleView(j.title))
             .setMessage(if (j.active) "받는 중이에요. 취소하고 지울까요?" else "이 작업과 임시로 받은 이미지를 지울까요?\n(저장한 ZIP·이미지는 그대로예요)")
             .setPositiveButton("지우기") { _, _ -> JobStore.remove(j) }
             .setNegativeButton("취소", null)

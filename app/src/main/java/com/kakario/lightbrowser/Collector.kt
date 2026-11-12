@@ -68,6 +68,7 @@ class Collector(private val a: MainActivity) {
         val shot = HashSet<String>()     // 화면을 찍어 둔 그림 주소
         val shotHashes = ArrayList<Long>()   // 찍은 화면 그림 지문들
         var sameCheckTap = 0L
+        var realNewAt = 0L      // 진짜 새 그림을 찾은 때 (화면만 바뀐 건 제외)
         var rewound = false     // 저장한 곳보다 앞에서 이어 받는 중
         var cursor = -1         // 지금 화면이 이미 받은 몇 번째 장인지 (빈 칸 채우기용)
         val saver = Runnable { saveNow(this) }
@@ -368,6 +369,7 @@ class Collector(private val a: MainActivity) {
                             if (norm != u && !j.foundNorm.add(norm)) continue
                             if (j.found.add(u)) {
                                 j.lastNewAt = SystemClock.uptimeMillis()
+                                j.realNewAt = j.lastNewAt
                                 j.autoRetries = 0
                                 j.sigOnly = 0
                                 scheduleSave(j)
@@ -403,7 +405,7 @@ class Collector(private val a: MainActivity) {
         if (!src.startsWith("http") || !o.optBoolean("ok") || !j.found.contains(src)) return
         val already = src in j.shot
         // 이미 찍은 주소: 넘긴 뒤 한 번만, 주소는 그대로인데 그림만 바뀌었는지 확인
-        if (already && (j.catchingUp || j.lastTapAt == 0L || j.sameCheckTap == j.lastTapAt || j.lastNewAt > j.lastTapAt)) return
+        if (already && (j.catchingUp || j.lastTapAt == 0L || j.sameCheckTap == j.lastTapAt || j.realNewAt > j.lastTapAt)) return
         val iw = o.optDouble("iw", 0.0)
         val ih = o.optDouble("ih", 0.0)
         val x = o.optDouble("x"); val y = o.optDouble("y"); val w = o.optDouble("w"); val h = o.optDouble("h")
@@ -451,9 +453,10 @@ class Collector(private val a: MainActivity) {
             return
         }
         // 주소는 그대로인데 화면 그림이 처음 보는 그림 → 새 장으로 화면을 저장
-        if (near || !j.running || j.lastNewAt > tapAt) return
+        if (near || !j.running || j.realNewAt > tapAt) return
         j.found.add("screen:$hash")
         j.lastNewAt = SystemClock.uptimeMillis()
+        j.realNewAt = j.lastNewAt
         j.autoRetries = 0
         j.sigOnly = 0
         scheduleSave(j)
@@ -507,6 +510,7 @@ class Collector(private val a: MainActivity) {
                     if (src.startsWith("blob:")) j.found.add(src)
                     if (!j.found.add(key)) return@post
                     j.lastNewAt = SystemClock.uptimeMillis()
+                    j.realNewAt = j.lastNewAt
                     j.autoRetries = 0
                     j.sigOnly = 0
                     scheduleSave(j)

@@ -23,6 +23,9 @@ object CollectSaves {
         val page get() = o.optString("page")
         val count get() = o.optJSONArray("ok")?.length() ?: 0
         val savedAt get() = o.optLong("savedAt")
+        val failed get() = o.optJSONObject("failed")?.length() ?: 0
+        val dups get() = o.optJSONArray("dups")?.length() ?: 0
+        val total get() = o.optJSONArray("urls")?.length() ?: 0
     }
 
     fun list(): List<Save> = (dir.listFiles() ?: emptyArray())

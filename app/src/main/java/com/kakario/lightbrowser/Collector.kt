@@ -752,6 +752,9 @@ class Collector(private val a: MainActivity) {
         return jobOf(w) == null && pending?.wv !== w && (w.url ?: "").startsWith("http")
     }
 
+    fun chooseSaved(s: CollectSaves.Save) = choose(s)
+    fun activeGrabIds(): Set<Long> = jobs.mapNotNull { it.grab?.id }.toSet()
+
     private fun choose(s: CollectSaves.Save) {
         val acts = ArrayList<Pair<String, () -> Unit>>()
         if (hereOk()) acts.add("지금 보는 페이지부터 이어 받기 (이미 받은 장은 건너뜀)" to { resumeSaved(s, here = true) })

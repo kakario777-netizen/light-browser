@@ -402,6 +402,79 @@ class Pages(private val a: MainActivity) {
 
     // ================= 다운로드 =================
 
+    // ================= 받다 멈춘 작업 =================
+
+    /** 받다 멈춘 작업 목록: 저장해 둔 넘기며 모으기 + 지금 멈춰 있는 것 + 실패가 남은 받기 */
+    fun openStopped() {
+        val box = page("받다 멈춘 작업", "stopped")
+        val body = LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, a.dp(24))
+        }
+        box.addView(ScrollView(a).apply { addView(body) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        val fmt = java.text.SimpleDateFormat("M월 d일 HH:mm", java.util.Locale.KOREA)
+        var any = false
+
+        val active = a.activeCollectIds()
+        val saves = CollectSaves.list().filter { it.id !in active }
+        if (saves.isNotEmpty()) {
+            any = true
+            section(body, "저장해 둔 넘기며 모으기 (${saves.size})")
+            saves.forEach { s ->
+                val extra = listOfNotNull(
+                    if (s.failed > 0) "실패 ${s.failed}" else null,
+                    if (s.dups > 0) "중복 건너뜀 ${s.dups}" else null,
+                ).joinToString(" · ")
+                val page = android.net.Uri.parse(s.page).let { (it.host ?: "") + (it.path ?: "") }.take(60)
+                row(body, s.title,
+                    "받은 ${s.count}장" + (if (extra.isNotEmpty()) " · $extra" else "") + " · ${fmt.format(java.util.Date(s.savedAt))} 저장\n멈춘 곳: $page",
+                    null) {
+                    back()
+                    a.chooseSaved(s)
+                }
+            }
+        }
+
+        val paused = a.collectJobsInfo().filter { it.paused }
+        if (paused.isNotEmpty()) {
+            any = true
+            section(body, "지금 멈춰 있는 모으기 (${paused.size})")
+            paused.forEach { c ->
+                row(body, c.title, c.status, null) {
+                    android.app.AlertDialog.Builder(a)
+                        .setTitle(c.title)
+                        .setItems(arrayOf("그 탭으로 가기", "이어 넘기기", "여기까지로 끝")) { _, w ->
+                            back()
+                            when (w) { 0 -> c.goTo(); 1 -> { c.goTo(); c.resume() }; else -> c.end() }
+                        }
+                        .setNegativeButton("닫기", null).show()
+                }
+            }
+        }
+
+        val failedJobs = JobStore.jobs.filter { !it.active && it.fails > 0 }
+        if (failedJobs.isNotEmpty()) {
+            any = true
+            section(body, "다 못 받은 작업 (${failedJobs.size})")
+            failedJobs.forEach { g ->
+                row(body, g.title, "받은 ${g.pics.size}장 · 실패 ${g.fails} (${g.failSummary()})", null) {
+                    back()
+                    a.openGrabJob(g)
+                }
+            }
+        }
+
+        if (!any) {
+            body.addView(TextView(a).apply {
+                text = "받다 멈춘 작업이 없어요.\n\n넘기며 모으기에서 '저장하고 그만'을 누르거나, 받다가 멈추면 여기에 나와요."
+                textSize = 15f
+                setTextColor(a.getColor(R.color.sub))
+                setPadding(a.dp(24), a.dp(32), a.dp(24), a.dp(16))
+            })
+        }
+    }
+
     fun openDownloads() {
         val box = page("다운로드", "downloads")
         val body = LinearLayout(a).apply {

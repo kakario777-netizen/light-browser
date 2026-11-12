@@ -1762,6 +1762,7 @@ class MainActivity : Activity() {
         m.add(0, 6, 0, "데스크톱 모드").apply { isCheckable = true; isChecked = t.desktop }
         m.add(0, 11, 0, "이미지 폴더 받기")
         m.add(0, 12, 0, "페이지 넘기며 이미지 모으기")
+        m.add(0, 14, 0, "받다 멈춘 작업")
         m.add(0, 13, 0, "실시간 번역 (일본어 → 한국어)").apply { isCheckable = true; isChecked = live.isOn }
         m.add(0, 9, 0, "설정")
         pm.setOnMenuItemClickListener { item ->
@@ -1778,6 +1779,7 @@ class MainActivity : Activity() {
                 11 -> grabFromPage(t)
                 12 -> { closeOverlays(); collector.beginOrResume() }
                 13 -> live.toggle()
+                14 -> { closeOverlays(); pages.openStopped() }
             }
             true
         }
@@ -1804,6 +1806,8 @@ class MainActivity : Activity() {
     }
 
     fun collectJobsInfo() = collector.info()
+    fun chooseSaved(s: CollectSaves.Save) = collector.chooseSaved(s)
+    fun activeCollectIds(): Set<Long> = collector.activeGrabIds()
 
     fun openGrabJob(g: GrabJob) {
         closeOverlays()

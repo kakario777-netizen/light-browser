@@ -11,7 +11,8 @@ import java.io.ByteArrayInputStream
  * 서버 정보는 설정 › 예약 저장 FTP에서 한 번만 넣고, 예약마다 'FTP로도 올리기'를 켜고 끔.
  */
 object Ftp {
-    class Conf(val host: String, val port: Int, val user: String, val pass: String, val dir: String, val passive: Boolean) {
+    class Conf(val host: String, val port: Int, val user: String, val pass: String, val dir: String, val passive: Boolean,
+               val enc: String = "UTF-8") {
         val ok get() = host.isNotBlank()
     }
 
@@ -19,12 +20,13 @@ object Ftp {
 
     fun conf(ctx: Context) = prefs(ctx).let {
         Conf(it.getString("host", "") ?: "", it.getInt("port", 21), it.getString("user", "") ?: "",
-            it.getString("pass", "") ?: "", it.getString("dir", "/라이트 브라우저") ?: "/라이트 브라우저", it.getBoolean("passive", true))
+            it.getString("pass", "") ?: "", it.getString("dir", "/라이트 브라우저") ?: "/라이트 브라우저", it.getBoolean("passive", true),
+            it.getString("enc", "UTF-8") ?: "UTF-8")
     }
 
     fun save(ctx: Context, c: Conf) {
         prefs(ctx).edit().putString("host", c.host.trim()).putInt("port", c.port).putString("user", c.user)
-            .putString("pass", c.pass).putString("dir", c.dir.trim()).putBoolean("passive", c.passive).apply()
+            .putString("pass", c.pass).putString("dir", c.dir.trim()).putBoolean("passive", c.passive).putString("enc", c.enc).apply()
     }
 
     /** 한 번 실행하는 동안 연결 하나를 열어 두고 여러 파일을 올림 */
@@ -38,7 +40,8 @@ object Ftp {
             cl?.let { if (it.isConnected) return it }
             return try {
                 val f = FTPClient()
-                f.controlEncoding = "UTF-8"
+                // 한글 파일·폴더 이름: 서버에 맞춰 UTF-8 또는 EUC-KR (오래된 NAS·공유기는 EUC-KR)
+                f.controlEncoding = c.enc
                 f.connectTimeout = 15000
                 f.connect(c.host, c.port)
                 if (!FTPReply.isPositiveCompletion(f.replyCode)) throw Exception("서버가 연결을 거절함 (${f.replyCode})")
@@ -46,8 +49,7 @@ object Ftp {
                 f.setFileType(FTP.BINARY_FILE_TYPE)
                 if (c.passive) f.enterLocalPassiveMode()
                 f.soTimeout = 30000
-                // 한글 파일 이름
-                runCatching { f.sendCommand("OPTS UTF8 ON") }
+                if (c.enc == "UTF-8") runCatching { f.sendCommand("OPTS UTF8 ON") }
                 cl = f
                 f
             } catch (e: Exception) {
@@ -99,6 +101,19 @@ object Ftp {
                 false
             }
         }
+
+        /** 폴더 고르기: 그 폴더 안의 하위 폴더 이름들 (실패하면 null) */
+        fun dirs(path: String): List<String>? {
+            val f = client() ?: return null
+            return try {
+                f.listDirectories(path.ifBlank { "/" })?.map { it.name }?.filter { it != "." && it != ".." }?.sorted()
+            } catch (e: Exception) {
+                error = e.message ?: e.javaClass.simpleName
+                null
+            }
+        }
+
+        fun mkdir(path: String): Boolean = try { client()?.makeDirectory(path) == true } catch (e: Exception) { false }
 
         fun close() {
             runCatching { cl?.logout() }

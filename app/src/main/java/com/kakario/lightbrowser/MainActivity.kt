@@ -324,6 +324,61 @@ class MainActivity : Activity() {
             .show()
     }
 
+    /** FTP 서버에 들어가서 폴더를 직접 골라 들어가며 선택 */
+    private fun browseFtp(conf: Ftp.Conf, start: String, pick: (String) -> Unit) {
+        if (!conf.ok) { toast("서버 주소를 먼저 넣어 주세요"); return }
+        val s = Ftp.Session(conf)
+        var path = start.ifBlank { "/" }
+        var dlg: AlertDialog? = null
+        fun show() {
+            toast("불러오는 중…")
+            Thread {
+                var dirs = s.dirs(path)
+                if (dirs == null && path != "/") { path = "/"; dirs = s.dirs(path) }
+                runOnUiThread {
+                    dlg?.dismiss()
+                    if (dirs == null) {
+                        AlertDialog.Builder(this).setTitle("폴더를 못 불러왔어요").setMessage(s.error ?: "연결 실패")
+                            .setPositiveButton("확인", null).show()
+                        Thread { s.close() }.start()
+                        return@runOnUiThread
+                    }
+                    val items = ArrayList<String>()
+                    if (path != "/") items.add("⬆  위 폴더로")
+                    items.add("＋  여기에 새 폴더 만들기")
+                    dirs.forEach { items.add("📁  $it") }
+                    dlg = AlertDialog.Builder(this)
+                        .setCustomTitle(titleView(path))
+                        .setItems(items.toTypedArray()) { _, w ->
+                            val t = items[w]
+                            when {
+                                t.startsWith("⬆") -> { path = path.trimEnd('/').substringBeforeLast('/').ifBlank { "/" }; show() }
+                                t.startsWith("＋") -> {
+                                    val et = EditText(this).apply { hint = "새 폴더 이름" }
+                                    AlertDialog.Builder(this).setTitle("새 폴더").setView(LinearLayout(this).apply { setPadding(dp(24), dp(8), dp(24), 0); addView(et, LinearLayout.LayoutParams(-1, -2)) })
+                                        .setPositiveButton("만들기") { _, _ ->
+                                            val n = et.text.toString().trim()
+                                            if (n.isNotEmpty()) Thread {
+                                                val np = path.trimEnd('/') + "/" + n
+                                                val ok = s.mkdir(np)
+                                                runOnUiThread { if (ok) { path = np; show() } else { toast("못 만들었어요"); show() } }
+                                            }.start()
+                                        }
+                                        .setNegativeButton("취소") { _, _ -> show() }.show()
+                                }
+                                else -> { path = path.trimEnd('/') + "/" + t.removePrefix("📁  "); show() }
+                            }
+                        }
+                        .setPositiveButton("이 폴더 선택") { _, _ -> pick(path); Thread { s.close() }.start() }
+                        .setNegativeButton("닫기") { _, _ -> Thread { s.close() }.start() }
+                        .setCancelable(false)
+                        .show()
+                }
+            }.start()
+        }
+        show()
+    }
+
     /** 설정 › 예약 저장 FTP 서버 */
     fun editFtp() {
         val c = Ftp.conf(this)
@@ -340,13 +395,28 @@ class MainActivity : Activity() {
         val pass = field("비밀번호", c.pass, pass = true)
         val dir = field("올릴 폴더 (예: /사진/라이트 브라우저)", c.dir)
         val passive = android.widget.CheckBox(this).apply { text = "패시브 모드 (잘 안 되면 끄거나 켜 보세요)"; isChecked = c.passive }
+        // 한글 이름 깨짐 방지: 서버 글자 방식
+        val encs = android.widget.RadioGroup(this).apply { orientation = android.widget.RadioGroup.HORIZONTAL }
+        val utf = android.widget.RadioButton(this).apply { text = "UTF-8"; id = View.generateViewId() }
+        val euc = android.widget.RadioButton(this).apply { text = "EUC-KR (한글이 깨지면)"; id = View.generateViewId() }
+        encs.addView(utf); encs.addView(euc)
+        encs.check(if (c.enc == "EUC-KR") euc.id else utf.id)
+        fun read() = Ftp.Conf(host.text.toString(), port.text.toString().toIntOrNull() ?: 21, user.text.toString(),
+            pass.text.toString(), dir.text.toString().ifBlank { "/" }, passive.isChecked, if (encs.checkedRadioButtonId == euc.id) "EUC-KR" else "UTF-8")
+        val pickDir = TextView(this).apply {
+            text = "📁 서버에 들어가서 폴더 고르기"
+            textSize = 15f
+            setTextColor(col(R.color.accent))
+            setPadding(0, dp(10), 0, dp(10))
+            setOnClickListener { browseFtp(read(), dir.text.toString().ifBlank { "/" }) { p -> dir.setText(p) } }
+        }
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(24), dp(8), dp(24), 0)
-            listOf(host, port, user, pass, dir, passive).forEach { addView(it) }
+            listOf(host, port, user, pass, dir, pickDir, passive).forEach { addView(it) }
+            addView(TextView(this@MainActivity).apply { text = "한글 글자 방식"; textSize = 13f; setTextColor(col(R.color.sub)); setPadding(0, dp(8), 0, 0) })
+            addView(encs)
         }
-        fun read() = Ftp.Conf(host.text.toString(), port.text.toString().toIntOrNull() ?: 21, user.text.toString(),
-            pass.text.toString(), dir.text.toString().ifBlank { "/" }, passive.isChecked)
         val d = AlertDialog.Builder(this)
             .setTitle("예약 저장 FTP 서버")
             .setView(android.widget.ScrollView(this).apply { addView(box) })

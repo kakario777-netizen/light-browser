@@ -234,7 +234,7 @@ class MainActivity : Activity() {
                     .setPositiveButton("확인", null).show()
                 return@evaluateJavascript
             }
-            val pages = Sched.pageTemplate(url, links)
+            val pages = Sched.pageTemplate(url, Sched.parseRaw(raw))
             val posts = links.count { Sched.shape(it) in shapes }
             val nm = (wv.title ?: "목록").take(60)
             AlertDialog.Builder(this)

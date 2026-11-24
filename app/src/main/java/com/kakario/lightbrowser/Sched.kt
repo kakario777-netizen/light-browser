@@ -339,7 +339,7 @@ object Sched {
                         }
                     }
                 }
-                main.postDelayed(scroller, 2500)
+                main.postDelayed(scroller, if (scroll) 2500 else 4500)
             }
             wv.webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView, u: String) { rlog("페이지 열림: $u"); finish() }
@@ -373,7 +373,7 @@ object Sched {
 
     /** 페이지 안 링크들 (주소 → 글자) */
     const val LINKS_JS = "(function(){var o=[];document.querySelectorAll('a[href]').forEach(function(a){" +
-        "var h=a.href;if(!/^https?:/.test(h))return;h=h.split('#')[0];o.push([h,(a.innerText||'').trim().slice(0,80)]);});" +
+        "var raw=a.href;if(!/^https?:/.test(raw))return;var h=raw.split('#')[0];o.push([h,(a.innerText||'').trim().slice(0,80),raw]);});" +
         "return JSON.stringify(o);})()"
 
     fun parseLinks(res: String?): List<String> = try {
@@ -381,10 +381,20 @@ object Sched {
         List(a.length()) { a.getJSONArray(it).getString(0) }.distinct()
     } catch (e: Exception) { emptyList() }
 
+    /** '#' 뒤까지 그대로 (쪽 번호가 #2, #3 … 으로 붙는 사이트용) */
+    fun parseRaw(res: String?): List<String> = try {
+        val a = JSONArray(res ?: "[]")
+        List(a.length()) { a.getJSONArray(it).let { x -> x.optString(2, x.getString(0)) } }.distinct()
+    } catch (e: Exception) { emptyList() }
+
     /** 링크 모양: 같은 사이트·같은 경로에 번호만 다른 것끼리 같은 모양 (글 목록의 글 링크를 가려내려고) */
     fun shape(u: String): String {
         val p = Uri.parse(u)
-        val path = (p.path ?: "").replace(Regex("\\d+"), "#")
+        // 글 주소에 제목이 섞인 경우(제목-1234567.html)도 같은 모양으로: 긴 번호가 든 칸은 통째로 '*#'
+        val path = (p.pathSegments ?: emptyList()).joinToString("/", prefix = "/") { seg ->
+            if (Regex("\\d{3,}").containsMatchIn(seg)) "*#" + (seg.substringAfterLast('.', "").let { e -> if (e.length in 2..5 && !e.any { it.isDigit() }) ".$e" else "" })
+            else seg.replace(Regex("\\d+"), "#")
+        }
         val q = p.queryParameterNames.sorted().joinToString("&") { k ->
             val v = p.getQueryParameter(k) ?: ""
             k + "=" + (if (v.any { it.isDigit() }) v.replace(Regex("\\d+"), "#") else v)
@@ -396,8 +406,8 @@ object Sched {
     fun postShapes(listUrl: String, links: List<String>): List<String> {
         val host = Uri.parse(listUrl).host
         val count = links.filter { Uri.parse(it).host == host }.groupingBy { shape(it) }.eachCount()
-        val good = count.filter { (k, n) -> n >= 5 && k.contains('#') }.keys
-        return good.sortedByDescending { count[it] }.take(3)
+        val good = count.filter { (k, n) -> n >= 3 && k.contains('#') }.keys
+        return good.sortedByDescending { count[it] }.take(5)
     }
 
     /**
@@ -405,10 +415,14 @@ object Sched {
      * 목록 주소와 숫자 하나(쪽 번호)만 다른 링크들을 찾음: ?page=3 또는 /page/3 같은 것
      */
     fun pageTemplate(listUrl: String, links: List<String>): Pair<String, Int>? {
-        val lp = Uri.parse(listUrl)
+        // 주소 끝 #2, #3 … 으로 쪽이 바뀌는 사이트
+        val listBase = listUrl.substringBefore('#')
+        val hashPages = links.mapNotNull { l -> if (l.substringBefore('#') == listBase) l.substringAfter('#', "").toIntOrNull() else null }
+        if (hashPages.size >= 2) return "$listBase#{N}" to hashPages.max()
+        val lp = Uri.parse(listBase)
         val byKey = HashMap<String, MutableList<Pair<String, Int>>>()
         for (l in links) {
-            val p = Uri.parse(l)
+            val p = Uri.parse(l.substringBefore('#'))
             if (p.host != lp.host) continue
             if (p.path == lp.path) {
                 // 쿼리에서 숫자 하나만 다름
@@ -767,7 +781,7 @@ class BackfillWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, param
         if (it.bfPage <= 0 || it.bfTpl.isEmpty()) {
             // 처음: 목록에서 쪽 주소 틀과 마지막 쪽 찾기
             val (res, _) = Sched.loadAndRun(ctx, it.url, Sched.LINKS_JS, scroll = false)
-            val tpl = Sched.pageTemplate(it.url, Sched.parseLinks(res))
+            val tpl = Sched.pageTemplate(it.url, Sched.parseRaw(res))
             if (tpl == null) {
                 Sched.update(ctx, id) { x -> x.bfPage = 0; x.bfText = "목록 아래 쪽 번호를 못 찾았어요" }
                 return Result.success()
@@ -776,7 +790,7 @@ class BackfillWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, param
             var max = tpl.second
             for (r in 0 until 8) {
                 val (r2, _) = Sched.loadAndRun(ctx, tpl.first.replace("{N}", max.toString()), Sched.LINKS_JS, scroll = false)
-                val more = Sched.pageTemplate(it.url, Sched.parseLinks(r2))?.second ?: 0
+                val more = Sched.pageTemplate(it.url, Sched.parseRaw(r2))?.second ?: 0
                 if (more <= max) break
                 max = more
             }

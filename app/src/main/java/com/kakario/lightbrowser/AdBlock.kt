@@ -70,7 +70,7 @@ object AdBlock {
                 val dir = java.io.File(app.filesDir, "adblock").apply { mkdirs() }
                 val got = ArrayList<Pair<java.io.File, java.io.File>>()
                 for (name in listOf("hosts.txt", "cosmetic.txt")) {
-                    val c = java.net.URL("https://github.com/kakario777-netizen/light-browser/releases/download/filters/$name.gz")
+                    val c = java.net.URL("https://github.com/kakario777-netizen/light-browser-release/releases/download/filters/$name.gz")
                         .openConnection() as java.net.HttpURLConnection
                     c.connectTimeout = 15000
                     c.readTimeout = 60000

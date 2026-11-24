@@ -25,8 +25,9 @@ class Updater(private val a: MainActivity) {
     private var busy = false
 
     companion object {
-        const val API = "https://api.github.com/repos/kakario777-netizen/light-browser/releases/tags/latest"
-        const val PAGE = "https://github.com/kakario777-netizen/light-browser/releases/tag/latest"
+        // 앱 파일만 올리는 공개 릴리스 저장소 (코드 저장소는 비공개)
+        const val API = "https://api.github.com/repos/kakario777-netizen/light-browser-release/releases/latest"
+        const val PAGE = "https://github.com/kakario777-netizen/light-browser-release/releases/latest"
     }
 
     /** 이 앱의 빌드 번호 */
@@ -63,7 +64,8 @@ class Updater(private val a: MainActivity) {
                 if (code != 200) throw Exception("서버 응답 $code")
                 val o = JSONObject(c.inputStream.bufferedReader().use { it.readText() })
                 c.disconnect()
-                val build = Regex("#(\\d+)").find(o.optString("name"))?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                val build = (Regex("(?:#|빌드\\s*)(\\d+)").find(o.optString("name"))?.groupValues?.get(1)?.toIntOrNull()
+                    ?: Regex("v\\d+\\.\\d+\\.(\\d+)").find(o.optString("tag_name"))?.groupValues?.get(1)?.toIntOrNull() ?: 0)
                 val assets = o.optJSONArray("assets")
                 var url = ""
                 var size = 0L

@@ -144,7 +144,7 @@ class MainActivity : Activity() {
         val url = wv?.url
         if (wv == null || url == null || !url.startsWith("http")) { toast("예약할 페이지를 먼저 열어 주세요"); return }
         val name = EditText(this).apply {
-            setText((wv.title ?: "").take(60))
+            setText(Sched.niceTitle(wv.title).take(80))
             hint = "이름 (저장 폴더 이름)"
             isSingleLine = true
         }
@@ -236,7 +236,7 @@ class MainActivity : Activity() {
             }
             val pages = Sched.pageTemplate(url, Sched.parseRaw(raw))
             val posts = links.count { Sched.shape(it) in shapes }
-            val nm = (wv.title ?: "목록").take(60)
+            val nm = Sched.niceTitle(wv.title).ifBlank { "목록" }.take(80)
             AlertDialog.Builder(this)
                 .setCustomTitle(titleView("이 목록 전부 받기"))
                 .setMessage("이 쪽 글 ${posts}개" + (if (pages != null) " · 쪽 번호 ${pages.second}쪽까지 보임 (끝 쪽은 들어가서 더 찾아요)" else " · 쪽 번호는 못 찾음 (이 쪽만 받아요)") +

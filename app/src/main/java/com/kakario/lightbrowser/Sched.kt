@@ -580,7 +580,8 @@ object Sched {
         val ua = android.webkit.WebSettings.getDefaultUserAgent(ctx)
         var saved = 0
         var failed = 0
-        val folder = if (perPost) clean(it.name) + "/" + clean(title.ifBlank { Uri.parse(it.url).lastPathSegment ?: "글" }).take(80)
+        val postName = niceTitle(title).ifBlank { clean(Uri.parse(it.url).lastPathSegment?.substringBeforeLast('.') ?: "글") }
+        val folder = if (perPost) clean(it.name) + "/" + postName.take(120)
             else clean(it.name.ifBlank { title }.ifBlank { Uri.parse(it.url).host ?: "예약 저장" })
         if (perPost) { seen.clear(); hashes.clear() }
         // 글마다 압축: 그림은 임시 폴더에 모았다가 끝나면 zip 하나로 저장·올림
@@ -640,7 +641,7 @@ object Sched {
             try {
                 val files = tmp.listFiles()?.sortedBy { f -> f.name } ?: emptyList()
                 if (files.isNotEmpty()) {
-                    val zipName = clean(title.ifBlank { Uri.parse(it.url).lastPathSegment ?: "글" }).take(120) + ".zip"
+                    val zipName = postName.take(150) + ".zip"
                     val zf = File(tmp.parentFile, "${tmp.name}.zip")
                     java.util.zip.ZipOutputStream(java.io.BufferedOutputStream(java.io.FileOutputStream(zf))).use { z ->
                         z.setLevel(1)   // 그림은 이미 압축돼 있어서 빠르게
@@ -668,6 +669,19 @@ object Sched {
         }
         val text = (if (saved > 0) "새 그림 ${saved}장 저장" else "새 그림 없음") + (if (failed > 0) " · 실패 $failed" else "")
         return saved to text
+    }
+
+    /**
+     * 페이지 제목을 폴더·파일 이름으로 (이미지 모으기 때와 같은 규칙):
+     * "제목 | 다른 제목 | 사이트" 처럼 나뉘어 있으면 한국어가 가장 많은 부분, 없으면 첫 부분. 자르지 않음.
+     */
+    fun niceTitle(raw: String?): String {
+        val s = (raw ?: "").trim()
+        if (s.isEmpty()) return ""
+        val hangul = Regex("[가-힣]")
+        val parts = s.split(Regex("\\s+[-–—|:·•]\\s+|\\s*[|｜]\\s*|\\s+::\\s+")).map { it.trim() }.filter { it.isNotEmpty() }
+        val kor = parts.filter { hangul.containsMatchIn(it) }
+        return clean((kor.maxByOrNull { p -> hangul.findAll(p).count() } ?: parts.firstOrNull() ?: s).trim())
     }
 
     private fun clean(s: String) = s.replace(Regex("[\\\\/:*?\"<>|\\n\\r\\t]"), "_").replace(Regex("\\s+"), " ").trim().trimEnd('.').ifBlank { "img" }

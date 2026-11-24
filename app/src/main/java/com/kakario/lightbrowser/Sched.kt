@@ -150,8 +150,8 @@ object Sched {
     private val main = Handler(Looper.getMainLooper())
 
     /** 페이지를 화면 없이 열어서 그림 주소들을 모음 (주소 → 그림 너비, 모르면 -1) */
-    fun collect(ctx: Context, url: String): Pair<Map<String, Int>, String> {
-        val (res, title) = loadAndRun(ctx, url, COLLECT_JS, scroll = true)
+    fun collect(ctx: Context, url: String, onlyPost: Boolean = false): Pair<Map<String, Int>, String> {
+        val (res, title) = loadAndRun(ctx, url, if (onlyPost) POST_JS else COLLECT_JS, scroll = true)
         val m = LinkedHashMap<String, Int>()
         try {
             val o = JSONObject(res)
@@ -287,6 +287,26 @@ object Sched {
         return pics to "새 글 ${posts}개 · 그림 ${pics}장 저장"
     }
 
+    /**
+     * 글 본문 그림만: 아래쪽 '다른 글' 미리보기·추천 글 썸네일은 빼기.
+     * - 다른 페이지로 가는 링크 안에 든 그림은 뺌 (다른 글 썸네일은 그 글로 가는 링크)
+     * - 화면 폭의 40%보다 좁게 그려진 그림은 뺌 (목록 썸네일·아이콘). 본문 그림은 거의 화면 폭 가득
+     * - 본문 첫 그림이 든 영역(글 내용 칸) 밖에 있는 그림은 뺌
+     */
+    private const val POST_JS = "(function(){var out={},W=innerWidth,here=location.href.split('#')[0];" +
+        "function add(u,w){if(!u||u.indexOf('data:')==0||u.indexOf('blob:')==0)return;try{u=new URL(u,location.href).href}catch(e){return}if(!(u in out)||out[u]<w)out[u]=w;}" +
+        "function foreign(e){var a=e.closest('a[href]');if(!a)return false;var h=a.href.split('#')[0];" +
+        "if(!/^https?:/.test(h)||h==here)return false;if(/\\.(jpe?g|png|webp|gif|avif)(\\?|$)/i.test(h))return false;return true;}" +
+        "var imgs=[].slice.call(document.querySelectorAll('img')).filter(function(e){var r=e.getBoundingClientRect();return r.width>=W*0.4&&!foreign(e);});" +
+        "if(!imgs.length)return '{}';" +
+        // 본문 칸: 첫 큰 그림에서 위로 올라가며, 그 칸 안의 큰 그림 수가 가장 많아질 때까지 (다른 글 링크가 많이 든 칸은 넘지 않음)
+        "var box=imgs[0],best=imgs[0],bestN=1;for(var p=imgs[0].parentElement;p&&p!=document.body;p=p.parentElement){" +
+        "var n=imgs.filter(function(i){return p.contains(i)}).length;var links=[].slice.call(p.querySelectorAll('a[href] img')).filter(foreign).length;" +
+        "if(links>=4)break;if(n>bestN){bestN=n;best=p;}}" +
+        "imgs.forEach(function(e){if(best===e||best.contains(e)){var w=e.naturalWidth||-1;add(e.currentSrc||e.src,w);" +
+        "['data-src','data-original','data-lazy-src','data-url'].forEach(function(a){var v=e.getAttribute(a);if(v)add(v,-1)});}});" +
+        "return JSON.stringify(out);})()"
+
     /** 한 번 실행: 새 그림만 받아 저장. 결과 문구를 돌려줌 */
     fun runOnce(ctx: Context, it: Item): Pair<Int, String> {
         if (it.mode == 1) return runPosts(ctx, it)
@@ -296,9 +316,9 @@ object Sched {
 
     /** 한 페이지를 열어 그 안의 그림을 받음. folderOverride가 있으면 '예약이름/글 제목' 폴더에 */
     private fun saveImagesOf(ctx: Context, it: Item, folderOverride: String?): Pair<Int, String> {
-        val (found, title) = collect(ctx, it.url)
-        if (found.isEmpty()) return 0 to "그림을 못 찾음 (페이지가 안 열렸거나 그림이 없음)"
         val perPost = folderOverride != null
+        val (found, title) = collect(ctx, it.url, onlyPost = perPost)
+        if (found.isEmpty()) return 0 to "그림을 못 찾음 (페이지가 안 열렸거나 그림이 없음)"
         val seenFile = File(ctx.filesDir, "sched/${it.id}.json").apply { parentFile?.mkdirs() }
         // 글마다 받을 때는 그 글 안에서만 중복을 봄 (다른 글의 같은 그림도 받음)
         val seen = LinkedHashSet<String>()

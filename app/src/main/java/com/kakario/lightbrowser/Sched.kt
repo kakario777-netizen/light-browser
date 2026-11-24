@@ -314,6 +314,12 @@ object Sched {
         return best[0].first to best.maxOf { it.second }
     }
 
+    /** 테스트: 글 하나를 지금 바로 (화면 없이) 받아 봄 */
+    fun test(ctx: Context, post: String, ftp: Boolean) {
+        val req = OneTimeWorkRequestBuilder<TestWorker>().setInputData(workDataOf("post" to post, "ftp" to ftp)).build()
+        WorkManager.getInstance(ctx).enqueueUniqueWork("sched-test", ExistingWorkPolicy.REPLACE, req)
+    }
+
     /** 처음부터 전부 받기 시작: 마지막 쪽 맨 아래 글부터 1쪽 맨 위 글까지 */
     fun startBackfill(ctx: Context, id: Long) {
         update(ctx, id) { x -> x.bfPage = -1; x.bfText = "쪽 수 알아보는 중…" }
@@ -609,6 +615,25 @@ class BackfillWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, param
             up?.close()
         }
         return Result.success()
+    }
+}
+
+/** 설정 › 테스트 */
+class TestWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {
+    override fun doWork(): Result = awake(applicationContext, "test") {
+        val ctx = applicationContext
+        val post = inputData.getString("post") ?: return@awake Result.success()
+        goForeground(1, "테스트 받는 중")
+        val conf = Ftp.conf(ctx)
+        val up = if (inputData.getBoolean("ftp", false) && conf.ok) Ftp.Session(conf) else null
+        val started = System.currentTimeMillis()
+        val n = try { Sched.savePost(ctx, Sched.Item(1, post, "테스트", 0), post, up) } catch (e: Exception) { 0 }
+        up?.close()
+        val secs = (System.currentTimeMillis() - started) / 1000
+        val text = (if (n > 0) "그림 ${n}장 저장 (${secs}초)" else "그림을 못 받았어요 (${secs}초)") +
+            (up?.error?.let { " · FTP 오류: $it" } ?: if (up != null) " · FTP에도 올림" else "")
+        Sched.doneNote(ctx, Sched.Item(1, post, "테스트", 0), text)
+        Result.success()
     }
 }
 

@@ -274,6 +274,30 @@ class MainActivity : Activity() {
             .setNegativeButton("취소", null).show()
     }
 
+    /** 설정 › 테스트: 지금 페이지로 예약 저장을 한 번 돌려 봄 (목록이면 맨 아래 글 하나, 글이면 그 글) */
+    fun schedTest() {
+        val wv = currentWebView()
+        val url = wv?.url
+        if (wv == null || url == null || !url.startsWith("http")) { toast("테스트할 페이지를 먼저 열어 주세요"); return }
+        wv.evaluateJavascript(Sched.LINKS_JS) { res ->
+            val raw = try { org.json.JSONTokener(res).nextValue() as? String } catch (e: Exception) { null }
+            val links = Sched.parseLinks(raw)
+            val shapes = Sched.postShapes(url, links)
+            val posts = links.filter { Sched.shape(it) in shapes }
+            val target: String
+            val what: String
+            if (posts.isNotEmpty()) { target = posts.last(); what = "목록 맨 아래 글 (글 ${posts.size}개 중 가장 오래된 것)" }
+            else { target = url; what = "지금 페이지 (글 목록이 아니라서 이 페이지 본문 그림)" }
+            val ftp = Ftp.conf(this).ok
+            AlertDialog.Builder(this)
+                .setCustomTitle(titleView("예약 저장 테스트"))
+                .setMessage("받을 것: $what\n$target\n\n저장 위치: 다운로드/라이트 브라우저/테스트/글 제목/" +
+                    (if (ftp) "\nFTP에도 올려요" else "") + "\n\n시작하면 알림창에 '예약 저장 중'이 떠요. 그때 화면을 꺼도 계속 받는지 확인해 보세요.")
+                .setPositiveButton("시작") { _, _ -> Sched.test(this, target, ftp); toast("시작했어요 · 화면 꺼 봐도 돼요") }
+                .setNegativeButton("취소", null).show()
+        }
+    }
+
     /** 설정 › 예약 저장 FTP 서버 */
     fun editFtp() {
         val c = Ftp.conf(this)

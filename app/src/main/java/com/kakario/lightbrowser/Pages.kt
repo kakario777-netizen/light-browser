@@ -140,6 +140,13 @@ class Pages(private val a: MainActivity) {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         val st = a.store
 
+        section(body, "테스트")
+        row(body, "예약 저장 테스트 (지금 보던 페이지)",
+            "목록이면 맨 아래(가장 오래된) 글 하나를, 글이면 그 글의 본문 그림을 화면 없이 받아 봐요. 받는 동안 화면을 꺼 보세요.", null) {
+            back()
+            a.schedTest()
+        }
+
         section(body, "광고 · 차단")
         switchRow(body, "광고 차단", "광고 서버·광고 칸·광고 팝업을 막아요", a.adblockOn) { a.setAdblock(it) }
         switchRow(body, "차단 우회 (보안 DNS)", "막힌 사이트 접속을 시도해요", st.bypass) {

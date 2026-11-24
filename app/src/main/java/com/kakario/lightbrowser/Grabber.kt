@@ -734,8 +734,10 @@ class Grabber(private val a: MainActivity) {
         val j = job ?: return
         val list = chosen()
         if (list.isEmpty()) { a.toastMsg("고른 이미지가 없어요"); return }
-        zip(j, list, deleteAfter = false)
-        a.toastMsg("압축 중… 끝나면 알림이 떠요")
+        // 전부 골라 압축하면 압축이 끝나는 대로 받은 이미지는 바로 지움 (일부만이면 물어봄)
+        val all = list.size >= j.pics.count { it.file.exists() }
+        zip(j, list, deleteAfter = all)
+        a.toastMsg(if (all) "압축 중… 끝나면 받은 이미지는 바로 지워요" else "압축 중… 끝나면 알림이 떠요")
     }
 
     /**

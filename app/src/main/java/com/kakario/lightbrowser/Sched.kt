@@ -65,12 +65,13 @@ object Sched {
         var bfTpl: String = "",                     // 쪽 주소 틀 ({N} 자리에 쪽 번호)
         var bfText: String = "",
         var zip: Boolean = true,                    // 글마다 압축(zip) 하나로 저장·올리기
+        var full: Boolean = false,                  // 예약이 아니라 '목록 전부 받기' 한 번짜리
     ) {
         fun toJson() = JSONObject().put("id", id).put("url", url).put("name", name).put("every", everyMin)
             .put("h", atHour).put("m", atMin).put("min", minPx).put("on", enabled).put("last", lastRun)
             .put("res", lastResult).put("total", total).put("next", nextAt).put("mode", mode)
             .put("pat", JSONArray(patterns)).put("times", JSONArray(times)).put("ftp", ftp)
-            .put("bfp", bfPage).put("bfm", bfMax).put("bft", bfTpl).put("bfx", bfText).put("zip", zip)
+            .put("bfp", bfPage).put("bfm", bfMax).put("bft", bfTpl).put("bfx", bfText).put("zip", zip).put("full", full)
 
         fun whenText(): String = when {
             everyMin == 0 -> "매일 " + dayTimes().joinToString(", ") { "%02d:%02d".format(it / 60, it % 60) }
@@ -87,7 +88,7 @@ object Sched {
                 o.optString("res"), o.optInt("total"), o.optLong("next"), o.optInt("mode"),
                 o.optJSONArray("pat")?.let { a -> List(a.length()) { a.getString(it) } } ?: emptyList(),
                 o.optJSONArray("times")?.let { a -> List(a.length()) { a.getInt(it) } } ?: emptyList(),
-                o.optBoolean("ftp"), o.optInt("bfp"), o.optInt("bfm"), o.optString("bft"), o.optString("bfx"), o.optBoolean("zip", true))
+                o.optBoolean("ftp"), o.optInt("bfp"), o.optInt("bfm"), o.optString("bft"), o.optString("bfx"), o.optBoolean("zip", true), o.optBoolean("full"))
         }
     }
 
@@ -166,7 +167,7 @@ object Sched {
     /** 앱을 켤 때: 예약이 빠져 있으면 다시 걸어 둠 (폰을 껐다 켠 경우 등) */
     fun ensure(ctx: Context) {
         val now = System.currentTimeMillis()
-        list(ctx).filter { it.enabled }.forEach { if (it.nextAt < now - 60_000) plan(ctx, it, 10_000L) }
+        list(ctx).filter { it.enabled && !it.full }.forEach { if (it.nextAt < now - 60_000) plan(ctx, it, 10_000L) }
     }
 
     // ---------------- 실제 실행 ----------------
@@ -802,7 +803,8 @@ class BackfillWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, param
                     seen.add(post)
                     done++
                     runCatching { seenF.writeText(org.json.JSONArray(seen.toList().takeLast(50000)).toString()) }
-                    Sched.update(ctx, id) { x -> x.total += n; x.bfText = "${page}쪽 받는 중 (${it.bfMax}쪽 중) · 이번에 글 ${done}개" }
+                    Sched.update(ctx, id) { x -> x.total += n; x.bfText = "${page}쪽 받는 중 (${it.bfMax}쪽 중) · 모두 그림 ${x.total}장" }
+                    goForeground(id, "${it.name} · ${page}/${it.bfMax}쪽 · 그림 ${it.total + n}장")
                     if (done >= 30) {
                         // 너무 오래 붙잡지 않게 끊고 이어서 다시
                         Sched.update(ctx, id) { x -> x.bfPage = page }

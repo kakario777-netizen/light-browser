@@ -219,6 +219,43 @@ class MainActivity : Activity() {
         }
     }
 
+    /** 목록 전부 받기: 예약 없이 한 번, 마지막 쪽 맨 아래 글부터 1쪽 맨 위 글까지 */
+    fun fullList() {
+        val wv = currentWebView()
+        val url = wv?.url
+        if (wv == null || url == null || !url.startsWith("http")) { toast("받을 목록 페이지를 먼저 열어 주세요"); return }
+        wv.evaluateJavascript(Sched.LINKS_JS) { res ->
+            val raw = try { org.json.JSONTokener(res).nextValue() as? String } catch (e: Exception) { null }
+            val links = Sched.parseLinks(raw)
+            val shapes = Sched.postShapes(url, links)
+            if (shapes.isEmpty()) {
+                AlertDialog.Builder(this).setTitle("글 목록을 못 알아봤어요")
+                    .setMessage("이 페이지에서 글 링크(번호만 다른 링크가 여러 개)를 찾지 못했어요. 작품·글 목록 페이지에서 해 주세요.")
+                    .setPositiveButton("확인", null).show()
+                return@evaluateJavascript
+            }
+            val pages = Sched.pageTemplate(url, links)
+            val posts = links.count { Sched.shape(it) in shapes }
+            val nm = (wv.title ?: "목록").take(60)
+            AlertDialog.Builder(this)
+                .setCustomTitle(titleView("이 목록 전부 받기"))
+                .setMessage("이 쪽 글 ${posts}개" + (if (pages != null) " · 쪽 번호 ${pages.second}쪽까지 보임 (끝 쪽은 들어가서 더 찾아요)" else " · 쪽 번호는 못 찾음 (이 쪽만 받아요)") +
+                    "\n\n마지막 쪽 맨 아래(가장 오래된) 글부터 1쪽 맨 위 글까지 차례로, 글마다 그림을 다 받아요. 화면이 꺼져도 계속하고, 끊기면 이어서 해요.\n저장 위치: 다운로드/라이트 브라우저/$nm/")
+                .setPositiveButton("다음") { _, _ ->
+                    schedOptions(nm, test = false) { ftp, _ ->
+                        val id = System.currentTimeMillis()
+                        val l = Sched.list(this)
+                        l.add(Sched.Item(id, url, nm, 0, enabled = false, mode = 1, patterns = shapes, ftp = ftp, full = true))
+                        Sched.saveAll(this, l)
+                        Sched.startBackfill(this, id)
+                        askBatteryOnce()
+                        toast("시작했어요 · 알림창과 메뉴 › 전부 받기·예약 목록에서 진행 상황을 볼 수 있어요")
+                    }
+                }
+                .setNegativeButton("취소", null).show()
+        }
+    }
+
     /** 주기 고르기: 몇 분·시간마다, 또는 매일 정해진 시각들 (예: 09:00, 13:30, 22:00) */
     fun pickInterval(title: String, current: List<Int> = emptyList(), done: (Int, List<Int>) -> Unit) {
         AlertDialog.Builder(this)
@@ -2116,8 +2153,9 @@ class MainActivity : Activity() {
         m.add(0, 11, 0, "이미지 폴더 받기")
         m.add(0, 12, 0, "페이지 넘기며 이미지 모으기")
         m.add(0, 14, 0, "받다 멈춘 작업")
+        m.add(0, 17, 0, "이 목록 전부 받기 (옛날 글부터)")
         m.add(0, 15, 0, "이 페이지 예약 저장")
-        m.add(0, 16, 0, "예약 저장 목록")
+        m.add(0, 16, 0, "전부 받기 · 예약 목록")
         m.add(0, 13, 0, "실시간 번역 (일본어 → 한국어)").apply { isCheckable = true; isChecked = live.isOn }
         m.add(0, 9, 0, "설정")
         pm.setOnMenuItemClickListener { item ->
@@ -2136,6 +2174,7 @@ class MainActivity : Activity() {
                 13 -> live.toggle()
                 14 -> { closeOverlays(); pages.openStopped() }
                 15 -> addSchedule()
+                17 -> fullList()
                 16 -> { closeOverlays(); pages.openSchedules() }
             }
             true

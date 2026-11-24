@@ -500,7 +500,7 @@ class Pages(private val a: MainActivity) {
     // ================= 예약 저장 목록 =================
 
     fun openSchedules() {
-        val box = page("예약 저장", "sched")
+        val box = page("전부 받기 · 예약", "sched")
         val body = LinearLayout(a).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 0, 0, a.dp(24))
@@ -518,10 +518,33 @@ class Pages(private val a: MainActivity) {
             })
             return
         }
-        section(body, "예약 ${items.size}개 · 다운로드/라이트 브라우저/ 에 저장")
-        items.forEach { it ->
+        val fulls = items.filter { it.full }
+        if (fulls.isNotEmpty()) {
+            section(body, "목록 전부 받기 ${fulls.size}개")
+            fulls.forEach { it ->
+                val running = it.bfPage != 0
+                row(body, it.name, (if (running) "받는 중 · " else "") + it.bfText.ifEmpty { "대기" } + " · 모두 그림 ${it.total}장" +
+                    (if (it.zip) " · 압축" else "") + (if (it.ftp) " · FTP" else ""), null) {
+                    val acts = listOf<Pair<String, () -> Unit>>(
+                        (if (running) "멈추기" else "이어서 받기 (받은 글은 건너뜀)") to {
+                            if (running) Sched.stopBackfill(a, it.id) else Sched.startBackfill(a, it.id)
+                            back(); openSchedules()
+                        },
+                        "페이지 열기" to { back(); a.openUrl(it.url) },
+                        "목록에서 지우기 (받은 그림은 남아요)" to { Sched.remove(a, it.id); back(); openSchedules() },
+                    )
+                    android.app.AlertDialog.Builder(a)
+                        .setCustomTitle(a.titleView(it.name))
+                        .setItems(acts.map { x -> x.first }.toTypedArray()) { _, w -> acts[w].second() }
+                        .setNegativeButton("닫기", null).show()
+                }
+            }
+        }
+        val scheds = items.filter { !it.full }
+        if (scheds.isNotEmpty()) section(body, "예약 ${scheds.size}개 · 다운로드/라이트 브라우저/ 에 저장")
+        scheds.forEach { it ->
             val state = (if (it.mode == 1) "새 글 받기 · " else "이 페이지 그림 · ") + if (!it.enabled) "꺼짐" else it.whenText() + (if (it.nextAt > 0) " · 다음 ${fmt.format(java.util.Date(it.nextAt))}" else "")
-            val bf = if (it.bfPage != 0 || it.bfText.isNotEmpty()) "\n전부 받기: ${it.bfText}" else ""
+            val bf = ""
             val last = (if (it.mode == 1 && it.zip) " · 압축" else "") + (if (it.ftp) " · FTP" else "") + bf + if (it.lastRun > 0) "\n마지막 ${fmt.format(java.util.Date(it.lastRun))}: ${it.lastResult} · 모두 ${it.total}장" else "\n아직 안 돌았어요"
             row(body, it.name, state + last, null) {
                 val acts = listOf<Pair<String, () -> Unit>>(
@@ -547,16 +570,7 @@ class Pages(private val a: MainActivity) {
                         }
                     },
                     "페이지 열기" to { back(); a.openUrl(it.url) },
-                    *(if (it.mode != 1) emptyArray() else if (it.bfPage != 0) arrayOf<Pair<String, () -> Unit>>(
-                        "처음부터 전부 받기 멈추기 (지금 ${it.bfText})" to { Sched.stopBackfill(a, it.id); back(); openSchedules() })
-                    else arrayOf<Pair<String, () -> Unit>>(
-                        "처음부터 전부 받기 (마지막 쪽 맨 아래 → 1쪽 맨 위)" to {
-                            android.app.AlertDialog.Builder(a)
-                                .setTitle("처음부터 전부 받기")
-                                .setMessage("목록 아래 쪽 번호에서 마지막 쪽을 찾아, 그 쪽 맨 아래(가장 오래된) 글부터 1쪽 맨 위 글까지 차례로 받아요.\n이미 받은 글은 건너뛰고, 화면이 꺼져도 계속하고, 끊기면 이어서 해요.")
-                                .setPositiveButton("시작") { _, _ -> Sched.startBackfill(a, it.id); a.toastMsg("시작했어요 · 목록에서 진행 상황을 볼 수 있어요"); back(); openSchedules() }
-                                .setNegativeButton("취소", null).show()
-                        })),
+
                     "예약 지우기 (받은 그림은 남아요)" to {
                         android.app.AlertDialog.Builder(a)
                             .setMessage("'${it.name}' 예약을 지울까요? 이미 받은 그림은 그대로 남아요.")

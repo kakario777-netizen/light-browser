@@ -83,6 +83,23 @@ object Ftp {
             }
         }
 
+        /** 큰 파일을 그대로 흘려 올림 (zip) */
+        fun uploadFile(sub: String, name: String, file: java.io.File): Boolean {
+            val f = client() ?: return false
+            return try {
+                val dir = (c.dir.trimEnd('/') + "/" + sub).replace(Regex("/+"), "/")
+                mkdirs(f, dir)
+                val ok = file.inputStream().buffered().use { s -> f.storeFile("$dir/$name", s) }
+                if (!ok) error = "올리기 실패 (${f.replyString?.trim()})"
+                ok
+            } catch (e: Exception) {
+                error = e.message ?: e.javaClass.simpleName
+                runCatching { cl?.disconnect() }
+                cl = null
+                false
+            }
+        }
+
         fun close() {
             runCatching { cl?.logout() }
             runCatching { cl?.disconnect() }

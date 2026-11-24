@@ -64,12 +64,13 @@ object Sched {
         var bfMax: Int = 0,
         var bfTpl: String = "",                     // 쪽 주소 틀 ({N} 자리에 쪽 번호)
         var bfText: String = "",
+        var zip: Boolean = true,                    // 글마다 압축(zip) 하나로 저장·올리기
     ) {
         fun toJson() = JSONObject().put("id", id).put("url", url).put("name", name).put("every", everyMin)
             .put("h", atHour).put("m", atMin).put("min", minPx).put("on", enabled).put("last", lastRun)
             .put("res", lastResult).put("total", total).put("next", nextAt).put("mode", mode)
             .put("pat", JSONArray(patterns)).put("times", JSONArray(times)).put("ftp", ftp)
-            .put("bfp", bfPage).put("bfm", bfMax).put("bft", bfTpl).put("bfx", bfText)
+            .put("bfp", bfPage).put("bfm", bfMax).put("bft", bfTpl).put("bfx", bfText).put("zip", zip)
 
         fun whenText(): String = when {
             everyMin == 0 -> "매일 " + dayTimes().joinToString(", ") { "%02d:%02d".format(it / 60, it % 60) }
@@ -86,7 +87,7 @@ object Sched {
                 o.optString("res"), o.optInt("total"), o.optLong("next"), o.optInt("mode"),
                 o.optJSONArray("pat")?.let { a -> List(a.length()) { a.getString(it) } } ?: emptyList(),
                 o.optJSONArray("times")?.let { a -> List(a.length()) { a.getInt(it) } } ?: emptyList(),
-                o.optBoolean("ftp"), o.optInt("bfp"), o.optInt("bfm"), o.optString("bft"), o.optString("bfx"))
+                o.optBoolean("ftp"), o.optInt("bfp"), o.optInt("bfm"), o.optString("bft"), o.optString("bfx"), o.optBoolean("zip", true))
         }
     }
 
@@ -492,7 +493,7 @@ object Sched {
 
     /** 글 하나 (처음부터 전부 받기에서 씀) */
     fun savePost(ctx: Context, it: Item, post: String, up: Ftp.Session?): Int =
-        saveImagesOf(ctx, Item(it.id, post, it.name, 0, minPx = it.minPx), folderOverride = "", up = up).first.coerceAtLeast(0)
+        saveImagesOf(ctx, Item(it.id, post, it.name, 0, minPx = it.minPx, zip = it.zip), folderOverride = "", up = up).first.coerceAtLeast(0)
 
     /**
      * 글 본문 그림만: 아래쪽 '다른 글' 미리보기·추천 글 썸네일은 빼기.
@@ -567,6 +568,9 @@ object Sched {
         val folder = if (perPost) clean(it.name) + "/" + clean(title.ifBlank { Uri.parse(it.url).lastPathSegment ?: "글" }).take(80)
             else clean(it.name.ifBlank { title }.ifBlank { Uri.parse(it.url).host ?: "예약 저장" })
         if (perPost) { seen.clear(); hashes.clear() }
+        // 글마다 압축: 그림은 임시 폴더에 모았다가 끝나면 zip 하나로 저장·올림
+        val zipMode = perPost && it.zip
+        val tmp = File(ctx.cacheDir, "schedzip/${it.id}_${System.nanoTime()}").apply { if (zipMode) mkdirs() }
         var idx = 0
         for ((u, w) in found) {
             idx++
@@ -602,6 +606,12 @@ object Sched {
                 val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.KOREA).format(java.util.Date())
                 // 글마다 받을 때는 순서대로 번호 (0001, 0002 …) — 만화처럼 순서가 중요
                 val fname = if (perPost) "%04d.%s".format(idx, ext) else "${stamp}_${base}.$ext"
+                if (zipMode) {
+                    File(tmp, fname).writeBytes(bytes)
+                    saved++
+                    rlog("받음 ${bytes.size / 1024}KB ${op.outWidth}x${op.outHeight} → (압축할) $fname")
+                    continue
+                }
                 if (saveImage(ctx, folder, fname, if (type.startsWith("image")) type else "image/$ext", bytes)) {
                     saved++; rlog("저장 ${bytes.size / 1024}KB ${op.outWidth}x${op.outHeight} → $folder/$fname")
                 } else { failed++; rlog("저장 실패: $fname") }
@@ -609,6 +619,31 @@ object Sched {
             } catch (e: Exception) {
                 failed++
                 rlog("받기 오류 ${e.javaClass.simpleName}: ${e.message} · $u")
+            }
+        }
+        if (zipMode) {
+            try {
+                val files = tmp.listFiles()?.sortedBy { f -> f.name } ?: emptyList()
+                if (files.isNotEmpty()) {
+                    val zipName = clean(title.ifBlank { Uri.parse(it.url).lastPathSegment ?: "글" }).take(120) + ".zip"
+                    val zf = File(tmp.parentFile, "${tmp.name}.zip")
+                    java.util.zip.ZipOutputStream(java.io.BufferedOutputStream(java.io.FileOutputStream(zf))).use { z ->
+                        z.setLevel(1)   // 그림은 이미 압축돼 있어서 빠르게
+                        files.forEach { f -> z.putNextEntry(java.util.zip.ZipEntry(f.name)); f.inputStream().use { s -> s.copyTo(z) }; z.closeEntry() }
+                    }
+                    val sub = clean(it.name)
+                    if (saveFile(ctx, sub, zipName, "application/zip", zf)) rlog("압축 저장 ${zf.length() / 1024}KB (${files.size}장) → $sub/$zipName")
+                    else { failed++; rlog("압축 저장 실패: $zipName") }
+                    if (up != null) {
+                        if (up.uploadFile(sub, zipName, zf)) rlog("FTP 올림 → $sub/$zipName") else rlog("FTP 올리기 실패: ${up.error}")
+                    }
+                    zf.delete()
+                }
+            } catch (e: Exception) {
+                failed++
+                rlog("압축 오류: ${e.message}")
+            } finally {
+                tmp.deleteRecursively()
             }
         }
         // 기억은 최근 것 위주로 (파일이 끝없이 커지지 않게)
@@ -621,6 +656,26 @@ object Sched {
     }
 
     private fun clean(s: String) = s.replace(Regex("[\\\\/:*?\"<>|\\n\\r\\t]"), "_").replace(Regex("\\s+"), " ").trim().trimEnd('.').ifBlank { "img" }
+
+    /** 큰 파일(zip)을 다운로드/라이트 브라우저/<폴더>/에 저장 */
+    private fun saveFile(ctx: Context, folder: String, name: String, mime: String, f: File): Boolean = try {
+        if (Build.VERSION.SDK_INT >= 29) {
+            val cv = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/라이트 브라우저/" + folder)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv)!!
+            ctx.contentResolver.openOutputStream(uri)!!.use { o -> f.inputStream().use { it.copyTo(o) } }
+            ctx.contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+            true
+        } else {
+            val dir = File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), folder).apply { mkdirs() }
+            f.copyTo(File(dir, name), overwrite = true)
+            true
+        }
+    } catch (e: Exception) { false }
 
     /** 다운로드/라이트 브라우저/<폴더>/에 저장 */
     private fun saveImage(ctx: Context, folder: String, name: String, mime: String, bytes: ByteArray): Boolean = try {

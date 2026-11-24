@@ -522,7 +522,7 @@ class Pages(private val a: MainActivity) {
         items.forEach { it ->
             val state = (if (it.mode == 1) "새 글 받기 · " else "이 페이지 그림 · ") + if (!it.enabled) "꺼짐" else it.whenText() + (if (it.nextAt > 0) " · 다음 ${fmt.format(java.util.Date(it.nextAt))}" else "")
             val bf = if (it.bfPage != 0 || it.bfText.isNotEmpty()) "\n전부 받기: ${it.bfText}" else ""
-            val last = (if (it.ftp) " · FTP" else "") + bf + if (it.lastRun > 0) "\n마지막 ${fmt.format(java.util.Date(it.lastRun))}: ${it.lastResult} · 모두 ${it.total}장" else "\n아직 안 돌았어요"
+            val last = (if (it.mode == 1 && it.zip) " · 압축" else "") + (if (it.ftp) " · FTP" else "") + bf + if (it.lastRun > 0) "\n마지막 ${fmt.format(java.util.Date(it.lastRun))}: ${it.lastResult} · 모두 ${it.total}장" else "\n아직 안 돌았어요"
             row(body, it.name, state + last, null) {
                 val acts = listOf<Pair<String, () -> Unit>>(
                     "지금 한 번 받기" to { Sched.plan(a, it, 1000L); a.toastMsg("곧 받기 시작해요 (알림으로 알려드려요)") },
@@ -531,6 +531,10 @@ class Pages(private val a: MainActivity) {
                         Sched.list(a).firstOrNull { x -> x.id == it.id }?.let { x -> Sched.plan(a, x) }
                         back(); openSchedules()
                     },
+                    *(if (it.mode != 1) emptyArray() else arrayOf<Pair<String, () -> Unit>>(
+                        (if (it.zip) "글마다 압축 끄기 (그림 낱장으로 저장)" else "글마다 압축(zip)으로 저장·올리기") to {
+                            Sched.update(a, it.id) { x -> x.zip = !x.zip }; back(); openSchedules()
+                        })),
                     (if (it.ftp) "FTP로 올리기 끄기" else "FTP로도 올리기") to {
                         if (!it.ftp && !Ftp.conf(a).ok) { a.toastMsg("설정 › 예약 저장 FTP에서 서버를 먼저 넣어 주세요"); a.editFtp() }
                         else { Sched.update(a, it.id) { x -> x.ftp = !x.ftp }; back(); openSchedules() }

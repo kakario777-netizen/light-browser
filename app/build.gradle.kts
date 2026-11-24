@@ -21,10 +21,11 @@ android {
     signingConfigs {
         // 고정 디버그 키 — 빌드마다 서명이 바뀌어 재설치가 필요해지는 문제 방지
         getByName("debug") {
-            storeFile = file("debug.keystore")
-            storePassword = "android"
+            // 서명 키는 저장소에 두지 않고, 빌드할 때 GitHub Secrets에서 꺼내 씀
+            storeFile = file(System.getenv("KEYSTORE_FILE") ?: "debug.keystore")
+            storePassword = System.getenv("KEYSTORE_PASS")?.takeIf { it.isNotEmpty() } ?: "android"
             keyAlias = "androiddebugkey"
-            keyPassword = "android"
+            keyPassword = System.getenv("KEYSTORE_PASS")?.takeIf { it.isNotEmpty() } ?: "android"
         }
     }
 
@@ -49,6 +50,7 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("commons-net:commons-net:3.11.1")
+    implementation("androidx.security:security-crypto:1.0.0")
     // 실시간 만화 번역: 글자 인식(구글 플레이 서비스가 처음 쓸 때 받음), 번역(모델은 쓸 때 받음), 고급 번역(모델은 따로 받음)
     implementation("com.google.android.gms:play-services-mlkit-text-recognition-japanese:16.0.1")
     implementation("com.google.mlkit:translate:17.0.3")

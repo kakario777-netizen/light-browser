@@ -25,9 +25,10 @@ class Updater(private val a: MainActivity) {
     private var busy = false
 
     companion object {
-        // 앱 파일만 올리는 공개 릴리스 저장소 (코드 저장소는 비공개)
-        const val API = "https://api.github.com/repos/kakario777-netizen/light-browser-release/releases/latest"
-        const val PAGE = "https://github.com/kakario777-netizen/light-browser-release/releases/latest"
+        // 업데이트는 이 저장소 릴리스에서만 (바꿀 수 있는 설정 없음)
+        const val API = "https://api.github.com/repos/kakario777-netizen/light-browser/releases/tags/latest"
+        const val PAGE = "https://github.com/kakario777-netizen/light-browser/releases/tag/latest"
+        private const val APK_PREFIX = "https://github.com/kakario777-netizen/light-browser/releases/download/"
     }
 
     /** 이 앱의 빌드 번호 */
@@ -71,7 +72,8 @@ class Updater(private val a: MainActivity) {
                 var size = 0L
                 if (assets != null) for (i in 0 until assets.length()) {
                     val as1 = assets.getJSONObject(i)
-                    if (as1.optString("name").endsWith(".apk")) {
+                    // 내 저장소 릴리스의 HTTPS 주소만 믿음
+                    if (as1.optString("name").endsWith(".apk") && as1.optString("browser_download_url").startsWith(APK_PREFIX)) {
                         url = as1.optString("browser_download_url")
                         size = as1.optLong("size")
                     }

@@ -442,6 +442,7 @@ class MainActivity : Activity() {
         val pass = field("비밀번호", c.pass, pass = true)
         val dir = field("올릴 폴더 (예: /사진/라이트 브라우저)", c.dir)
         val passive = android.widget.CheckBox(this).apply { text = "패시브 모드 (잘 안 되면 끄거나 켜 보세요)"; isChecked = c.passive }
+        val secure = android.widget.CheckBox(this).apply { text = "FTPS 암호화 (서버가 지원하면 켜 두세요)"; isChecked = c.secure }
         // 한글 이름 깨짐 방지: 서버 글자 방식
         val encs = android.widget.RadioGroup(this).apply { orientation = android.widget.RadioGroup.HORIZONTAL }
         val utf = android.widget.RadioButton(this).apply { text = "UTF-8"; id = View.generateViewId() }
@@ -449,7 +450,8 @@ class MainActivity : Activity() {
         encs.addView(utf); encs.addView(euc)
         encs.check(if (c.enc == "EUC-KR") euc.id else utf.id)
         fun read() = Ftp.Conf(host.text.toString(), port.text.toString().toIntOrNull() ?: 21, user.text.toString(),
-            pass.text.toString(), dir.text.toString().ifBlank { "/" }, passive.isChecked, if (encs.checkedRadioButtonId == euc.id) "EUC-KR" else "UTF-8")
+            pass.text.toString(), dir.text.toString().ifBlank { "/" }, passive.isChecked, if (encs.checkedRadioButtonId == euc.id) "EUC-KR" else "UTF-8",
+            secure.isChecked)
         val pickDir = TextView(this).apply {
             text = "📁 서버에 들어가서 폴더 고르기"
             textSize = 15f
@@ -460,7 +462,7 @@ class MainActivity : Activity() {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(24), dp(8), dp(24), 0)
-            listOf(host, port, user, pass, dir, pickDir, passive).forEach { addView(it) }
+            listOf(host, port, user, pass, dir, pickDir, passive, secure).forEach { addView(it) }
             addView(TextView(this@MainActivity).apply { text = "한글 글자 방식"; textSize = 13f; setTextColor(col(R.color.sub)); setPadding(0, dp(8), 0, 0) })
             addView(encs)
         }

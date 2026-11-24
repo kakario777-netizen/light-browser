@@ -488,7 +488,7 @@ class Pages(private val a: MainActivity) {
             section(body, "목록 전부 받기 ${fulls.size}개")
             fulls.forEach { it ->
                 val running = it.bfPage != 0
-                row(body, it.name, (if (running) "받는 중 · " else "") + it.bfText.ifEmpty { "대기" } + " · 모두 그림 ${it.total}장" +
+                row(body, it.name, (if (running) "받는 중 · " else "") + it.bfText.ifEmpty { "대기" } + " · 누적 ${it.total}장" +
                     (if (it.zip) " · 압축" else "") + (if (it.ftp) " · FTP" else ""), null) {
                     val acts = listOf<Pair<String, () -> Unit>>(
                         (if (running) "멈추기" else "이어서 받기 (받은 글은 건너뜀)") to {
@@ -510,7 +510,7 @@ class Pages(private val a: MainActivity) {
         scheds.forEach { it ->
             val state = (if (it.mode == 1) "새 글 받기 · " else "이 페이지 그림 · ") + if (!it.enabled) "꺼짐" else it.whenText() + (if (it.nextAt > 0) " · 다음 ${fmt.format(java.util.Date(it.nextAt))}" else "")
             val bf = ""
-            val last = (if (it.mode == 1 && it.zip) " · 압축" else "") + (if (it.ftp) " · FTP" else "") + bf + if (it.lastRun > 0) "\n마지막 ${fmt.format(java.util.Date(it.lastRun))}: ${it.lastResult} · 모두 ${it.total}장" else "\n아직 안 돌았어요"
+            val last = (if (it.mode == 1 && it.zip) " · 압축" else "") + (if (it.ftp) " · FTP" else "") + bf + if (it.lastRun > 0) "\n마지막 ${fmt.format(java.util.Date(it.lastRun))}: ${it.lastResult} · 누적 ${it.total}장" else "\n아직 안 돌았어요"
             row(body, it.name, state + last, null) {
                 val acts = listOf<Pair<String, () -> Unit>>(
                     "지금 한 번 받기" to { Sched.plan(a, it, 1000L); a.toastMsg("곧 받기 시작해요 (알림으로 알려드려요)") },

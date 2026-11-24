@@ -96,6 +96,9 @@ object Sched {
 
     /** 테스트할 때만: 한 단계씩 무슨 일이 있었는지 기록 */
     @Volatile var report: StringBuilder? = null
+
+    /** 받는 중 알림에 보여줄 것: (작품 이름, 이 작품에서 받은 장수) — 일하는 쪽에서 설정 */
+    @Volatile var progress: ((String, Int) -> Unit)? = null
     private fun rlog(s: String) {
         report?.append(java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.KOREA).format(java.util.Date()))?.append("  ")?.append(s)?.append('\n')
     }
@@ -625,11 +628,13 @@ object Sched {
                 if (zipMode) {
                     File(tmp, fname).writeBytes(bytes)
                     saved++
+                    progress?.invoke(postName, saved)
                     rlog("받음 ${bytes.size / 1024}KB ${op.outWidth}x${op.outHeight} → (압축할) $fname")
                     continue
                 }
                 if (saveImage(ctx, folder, fname, if (type.startsWith("image")) type else "image/$ext", bytes)) {
                     saved++; rlog("저장 ${bytes.size / 1024}KB ${op.outWidth}x${op.outHeight} → $folder/$fname")
+                    progress?.invoke(postName, saved)
                 } else { failed++; rlog("저장 실패: $fname") }
                 up?.upload(folder, fname, bytes)
             } catch (e: Exception) {
@@ -826,12 +831,14 @@ object Sched {
         }
     }
 
-    fun working(ctx: Context, name: String): Notification {
+    fun working(ctx: Context, name: String, title: String = "예약 저장 중"): Notification {
         channel(ctx)
         return Notification.Builder(ctx, "sched")
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle("예약 저장 중")
+            .setContentTitle(title)
             .setContentText(name)
+            .setStyle(Notification.BigTextStyle().bigText(name))
+            .setOnlyAlertOnce(true)
             .setOngoing(true)
             .build()
     }
@@ -859,9 +866,9 @@ private inline fun <T> awake(ctx: Context, tag: String, f: () -> T): T {
     try { return f() } finally { runCatching { wl.release() } }
 }
 
-private fun Worker.goForeground(id: Long, text: String) {
+private fun Worker.goForeground(id: Long, text: String, title: String = "예약 저장 중") {
     try {
-        val n = Sched.working(applicationContext, text)
+        val n = Sched.working(applicationContext, text, title)
         val info = if (Build.VERSION.SDK_INT >= 29)
             ForegroundInfo(4100 + (id % 100).toInt(), n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         else ForegroundInfo(4100 + (id % 100).toInt(), n)
@@ -911,6 +918,17 @@ class BackfillWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, param
             try { org.json.JSONArray(seenF.readText()).let { a -> for (i in 0 until a.length()) seen.add(a.getString(i)) } } catch (e: Exception) {}
             val shapes = it.patterns.toSet()
             var page = it.bfPage
+            val base = it.total
+            var lastNote = 0L
+            // 알림: 제목 = 메인 폴더, 내용 = 작품 이름 · 이 작품 n장 · 누적 m장 · 쪽
+            Sched.progress = { post, n ->
+                val now = System.currentTimeMillis()
+                if (now - lastNote > 1000) {
+                    lastNote = now
+                    val sum = Sched.list(ctx).firstOrNull { x -> x.id == id }?.total ?: base
+                    goForeground(id, "$post\n이 작품 ${n}장 · 누적 ${sum + n}장 · ${page}/${it.bfMax}쪽", "전부 받기 · ${it.name}")
+                }
+            }
             while (page >= 1 && !isStopped) {
                 val (res, _) = Sched.loadAndRun(ctx, it.bfTpl.replace("{N}", page.toString()), Sched.LINKS_JS, scroll = false)
                 val posts = Sched.parseLinks(res).filter { l -> shapes.isEmpty() || Sched.shape(l) in shapes }
@@ -922,8 +940,9 @@ class BackfillWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, param
                     seen.add(post)
                     done++
                     runCatching { seenF.writeText(org.json.JSONArray(seen.toList().takeLast(50000)).toString()) }
-                    Sched.update(ctx, id) { x -> x.total += n; x.bfText = "${page}쪽 받는 중 (${it.bfMax}쪽 중) · 모두 그림 ${x.total}장" }
-                    goForeground(id, "${it.name} · ${page}/${it.bfMax}쪽 · 그림 ${it.total + n}장")
+                    Sched.update(ctx, id) { x -> x.total += n; x.bfText = "${page}쪽 받는 중 (${it.bfMax}쪽 중) · 누적 ${x.total}장" }
+                    val sum = Sched.list(ctx).firstOrNull { x -> x.id == id }?.total ?: 0
+                    goForeground(id, "작품 하나 끝 · ${n}장\n누적 ${sum}장 · ${page}/${it.bfMax}쪽 · 이번에 작품 ${done}개", "전부 받기 · ${it.name}")
                     if (done >= 30) {
                         // 너무 오래 붙잡지 않게 끊고 이어서 다시
                         Sched.update(ctx, id) { x -> x.bfPage = page }
@@ -951,7 +970,8 @@ class TestWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {
     override fun doWork(): Result = awake(applicationContext, "test") {
         val ctx = applicationContext
         val post = inputData.getString("post") ?: return@awake Result.success()
-        goForeground(1, "테스트 받는 중")
+        goForeground(1, "테스트 받는 중", "받기 테스트")
+        Sched.progress = { post, k -> goForeground(1, "$post\n이 작품 ${k}장", "받기 테스트") }
         val conf = Ftp.conf(ctx)
         val up = if (inputData.getBoolean("ftp", false) && conf.ok) Ftp.Session(conf) else null
         val started = System.currentTimeMillis()
@@ -981,7 +1001,12 @@ class SchedWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) 
         val id = inputData.getLong("id", -1)
         val it = Sched.list(applicationContext).firstOrNull { x -> x.id == id } ?: return Result.success()
         if (!it.enabled) return Result.success()
-        goForeground(id, it.name)
+        goForeground(id, "확인 중…", "예약 저장 · ${it.name}")
+        var lastNote = 0L
+        Sched.progress = { post, n ->
+            val now = System.currentTimeMillis()
+            if (now - lastNote > 1000) { lastNote = now; goForeground(id, "$post\n이 작품 ${n}장 · 누적 ${it.total + n}장", "예약 저장 · ${it.name}") }
+        }
         val (n, text) = try { Sched.runOnce(applicationContext, it) } catch (e: Exception) { 0 to "실패: ${e.message ?: e.javaClass.simpleName}" }
         Sched.update(applicationContext, id) { x ->
             x.lastRun = System.currentTimeMillis()

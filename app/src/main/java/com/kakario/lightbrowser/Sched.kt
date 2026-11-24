@@ -246,7 +246,7 @@ object Sched {
     /** 화면에 가장 크게 보이는 그림: '주소|다 떴는지' */
     private const val MAIN_IMG_JS = "(function(){var W=innerWidth,H=innerHeight,b=null,ba=0;document.querySelectorAll('img').forEach(function(e){" +
         "var r=e.getBoundingClientRect();var w=Math.min(r.right,W)-Math.max(r.left,0),h=Math.min(r.bottom,H)-Math.max(r.top,0);" +
-        "if(w>0&&h>0&&w*h>ba){ba=w*h;b=e}});if(!b)return '';return (b.currentSrc||b.src)+'|'+(b.complete&&b.naturalWidth>0)})()"
+        "if(w>0&&h>0&&w*h>ba){ba=w*h;b=e}});if(!b)return '';return (b.currentSrc||b.src)+'|'+(b.complete?b.naturalWidth:0)})()"
 
     /**
      * 그림 뷰어(한 장씩 보는 페이지): 주소 끝 번호(#1, #2 …)만 바꿔 가며 한 장씩 그림 주소를 모음.
@@ -271,7 +271,9 @@ object Sched {
                     Thread.sleep(250)
                     val r = h.eval(MAIN_IMG_JS)
                     val s = r.substringBeforeLast('|')
-                    if (s.startsWith("http") && s != prev && r.endsWith("|true")) { src = s; break }
+                    val nw = r.substringAfterLast('|').toIntOrNull() ?: 0
+                    // 다 뜬 '진짜' 그림만: 로딩 중 그림(작은 빈 그림)이나 이미 모은 앞 장은 기다림
+                    if (s.startsWith("http") && s != prev && s !in out && nw >= 300) { src = s; break }
                 }
                 if (src.isEmpty()) {
                     miss++
@@ -588,6 +590,7 @@ object Sched {
                 // 작은 그림(아이콘·버튼) 거르기
                 val op = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.size, op)
+                if (op.outWidth <= 0 && bytes.size < 20_000) { rlog("건너뜀 (그림으로 안 읽히는 작은 파일 ${bytes.size}B · 로딩 그림 같음): $u"); continue }
                 if (op.outWidth > 0 && maxOf(op.outWidth, op.outHeight) < it.minPx) { rlog("건너뜀 (작은 그림 ${op.outWidth}x${op.outHeight}): $u"); continue }
                 val h = MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { b -> "%02x".format(b) }
                 if (!hashes.add(h)) { rlog("건너뜀 (같은 그림): $u"); continue }   // 주소만 다른 같은 그림

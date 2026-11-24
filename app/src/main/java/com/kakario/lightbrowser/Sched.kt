@@ -728,8 +728,38 @@ object Sched {
         }
     } catch (e: Exception) { false }
 
+    /**
+     * 갤러리가 '다운로드/라이트 브라우저' 아래 그림을 앨범으로 잡지 않게 (.nomedia 하나).
+     * 새 폴더 생길 때마다 갤러리가 '백업할까요?' 묻는 걸 막음. 한 번만 만들면 됨.
+     */
+    private fun ensureNoMedia(ctx: Context) {
+        val p = prefs(ctx)
+        if (p.getBoolean("nomedia", false) || Build.VERSION.SDK_INT < 29) return
+        try {
+            val rel = Environment.DIRECTORY_DOWNLOADS + "/라이트 브라우저/"
+            val cv = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, ".nomedia")
+                put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, rel)
+            }
+            val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv)
+            if (uri != null) {
+                ctx.contentResolver.openOutputStream(uri)?.use { }
+                // 이름이 바뀌어 들어갔으면(.nomedia가 아니면) 소용없으니 지움
+                val name = ctx.contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
+                    ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+                if (name != ".nomedia") ctx.contentResolver.delete(uri, null, null)
+                rlog(if (name == ".nomedia") "갤러리에 안 잡히게 .nomedia 만듦" else "갤러리 숨김 파일을 못 만듦 ($name)")
+            }
+        } catch (e: Exception) {
+            rlog("갤러리 숨김 파일 오류: ${e.message}")
+        }
+        p.edit().putBoolean("nomedia", true).apply()
+    }
+
     /** 다운로드/라이트 브라우저/<폴더>/에 저장 */
     private fun saveImage(ctx: Context, folder: String, name: String, mime: String, bytes: ByteArray): Boolean = try {
+        ensureNoMedia(ctx)
         if (Build.VERSION.SDK_INT >= 29) {
             val cv = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, name)

@@ -133,6 +133,74 @@ class MainActivity : Activity() {
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
     fun toastMsg(s: String) = toast(s)
 
+    // ---------------- 예약 저장 ----------------
+
+    private val schedChoices = listOf(30 to "30분마다", 60 to "1시간마다", 180 to "3시간마다", 360 to "6시간마다",
+        720 to "12시간마다", 1440 to "하루마다", 0 to "매일 정해진 시각…")
+
+    /** 지금 페이지를 예약 저장에 추가 */
+    fun addSchedule() {
+        val wv = currentWebView()
+        val url = wv?.url
+        if (wv == null || url == null || !url.startsWith("http")) { toast("예약할 페이지를 먼저 열어 주세요"); return }
+        val name = EditText(this).apply {
+            setText((wv.title ?: "").take(60))
+            hint = "이름 (저장 폴더 이름)"
+            isSingleLine = true
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), 0)
+            addView(name)
+            addView(TextView(this@MainActivity).apply {
+                text = "화면이 꺼져 있어도 정한 때마다 이 페이지를 몰래 열어서, 아직 안 받은 그림만 저장해요.\n저장 위치: 다운로드/라이트 브라우저/이름/"
+                textSize = 13f
+                setTextColor(col(R.color.sub))
+                setPadding(0, dp(8), 0, 0)
+            })
+        }
+        AlertDialog.Builder(this)
+            .setCustomTitle(titleView("이 페이지 예약 저장"))
+            .setView(box)
+            .setPositiveButton("다음") { _, _ -> pickInterval(name.text.toString().trim().ifBlank { wv.title ?: "예약 저장" }) { every, h, m ->
+                Sched.add(this, Sched.Item(System.currentTimeMillis(), url, name.text.toString().trim().ifBlank { wv.title ?: "예약 저장" }, every, h, m), runNow = true)
+                askBatteryOnce()
+                toast("예약했어요 · 지금 한 번 바로 받아 볼게요")
+            } }
+            .setNegativeButton("취소", null)
+            .show()
+    }
+
+    /** 주기 고르기 (매일 정해진 시각이면 시각까지) */
+    fun pickInterval(title: String, done: (Int, Int, Int) -> Unit) {
+        AlertDialog.Builder(this)
+            .setCustomTitle(titleView("$title · 얼마나 자주?"))
+            .setItems(schedChoices.map { it.second }.toTypedArray()) { _, w ->
+                val every = schedChoices[w].first
+                if (every > 0) done(every, 9, 0)
+                else android.app.TimePickerDialog(this, { _, h, m -> done(0, h, m) }, 9, 0, true).show()
+            }
+            .setNegativeButton("취소", null)
+            .show()
+    }
+
+    /** 화면 꺼진 채로 제때 돌려면 배터리 최적화에서 빼는 게 좋음 (한 번만 물어봄) */
+    private fun askBatteryOnce() {
+        val pm = getSystemService(android.os.PowerManager::class.java)
+        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+        AlertDialog.Builder(this)
+            .setTitle("화면 꺼져도 제때 돌게")
+            .setMessage("배터리 최적화가 켜져 있으면 폰이 잠들어 있을 때 예약이 늦어질 수 있어요. 이 앱만 최적화에서 뺄까요?")
+            .setPositiveButton("빼기") { _, _ ->
+                try {
+                    startActivity(Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+                } catch (e: Exception) {
+                }
+            }
+            .setNegativeButton("괜찮아요", null)
+            .show()
+    }
+
     /** 긴 글자는 한 줄로 두고 자동으로 흘러가게 (전광판처럼) */
     fun marquee(tv: TextView) {
         tv.isSingleLine = true
@@ -219,6 +287,12 @@ class MainActivity : Activity() {
                 i.removeExtra(BgWork.EXTRA_DOWNLOADS)
                 closeOverlays()
                 pages.openDownloads()
+                return
+            }
+            i.getBooleanExtra("open_sched", false) -> {
+                i.removeExtra("open_sched")
+                closeOverlays()
+                pages.openSchedules()
                 return
             }
         }
@@ -552,6 +626,7 @@ class MainActivity : Activity() {
         updater = Updater(this)
         frame.postDelayed({ updater.autoCheck() }, 3000)
         frame.postDelayed({ AdBlock.refresh(this, store) }, 8000)
+        frame.postDelayed({ Sched.ensure(this) }, 5000)
         frame.postDelayed({ if (::collector.isInitialized) collector.askSavedOnStart() }, 1500)
         frame.addView(parking, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         frame.addView(root, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -1783,6 +1858,8 @@ class MainActivity : Activity() {
         m.add(0, 11, 0, "이미지 폴더 받기")
         m.add(0, 12, 0, "페이지 넘기며 이미지 모으기")
         m.add(0, 14, 0, "받다 멈춘 작업")
+        m.add(0, 15, 0, "이 페이지 예약 저장")
+        m.add(0, 16, 0, "예약 저장 목록")
         m.add(0, 13, 0, "실시간 번역 (일본어 → 한국어)").apply { isCheckable = true; isChecked = live.isOn }
         m.add(0, 9, 0, "설정")
         pm.setOnMenuItemClickListener { item ->
@@ -1800,6 +1877,8 @@ class MainActivity : Activity() {
                 12 -> { closeOverlays(); collector.beginOrResume() }
                 13 -> live.toggle()
                 14 -> { closeOverlays(); pages.openStopped() }
+                15 -> addSchedule()
+                16 -> { closeOverlays(); pages.openSchedules() }
             }
             true
         }

@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -52,6 +53,11 @@
             android:name=".BgService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <!-- 예약 저장이 화면 꺼진 채로 오래 돌 수 있게 (WorkManager 포그라운드) -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
         <receiver android:name=".InstallResultReceiver" android:exported="false" />
         <receiver android:name=".UpdatedReceiver" android:exported="false">
             <intent-filter>

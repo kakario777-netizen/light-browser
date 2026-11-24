@@ -485,6 +485,63 @@ class Pages(private val a: MainActivity) {
         }
     }
 
+    // ================= 예약 저장 목록 =================
+
+    fun openSchedules() {
+        val box = page("예약 저장", "sched")
+        val body = LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, a.dp(24))
+        }
+        box.addView(FastScroll.wrap(ScrollView(a).apply { addView(body) }),
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        val fmt = java.text.SimpleDateFormat("M월 d일 HH:mm", java.util.Locale.KOREA)
+        val items = Sched.list(a)
+        if (items.isEmpty()) {
+            body.addView(TextView(a).apply {
+                text = "예약한 페이지가 없어요.\n\n그림을 모으고 싶은 페이지를 열고 메뉴 › '이 페이지 예약 저장'을 누르면, 화면이 꺼져 있어도 정한 때마다 새 그림만 저장해요."
+                textSize = 15f
+                setTextColor(a.getColor(R.color.sub))
+                setPadding(a.dp(24), a.dp(32), a.dp(24), a.dp(16))
+            })
+            return
+        }
+        section(body, "예약 ${items.size}개 · 다운로드/라이트 브라우저/ 에 저장")
+        items.forEach { it ->
+            val state = if (!it.enabled) "꺼짐" else it.whenText() + (if (it.nextAt > 0) " · 다음 ${fmt.format(java.util.Date(it.nextAt))}" else "")
+            val last = if (it.lastRun > 0) "\n마지막 ${fmt.format(java.util.Date(it.lastRun))}: ${it.lastResult} · 모두 ${it.total}장" else "\n아직 안 돌았어요"
+            row(body, it.name, state + last, null) {
+                val acts = listOf<Pair<String, () -> Unit>>(
+                    "지금 한 번 받기" to { Sched.plan(a, it, 1000L); a.toastMsg("곧 받기 시작해요 (알림으로 알려드려요)") },
+                    (if (it.enabled) "예약 끄기" else "예약 켜기") to {
+                        Sched.update(a, it.id) { x -> x.enabled = !x.enabled }
+                        Sched.list(a).firstOrNull { x -> x.id == it.id }?.let { x -> Sched.plan(a, x) }
+                        back(); openSchedules()
+                    },
+                    "얼마나 자주 바꾸기 (지금: ${it.whenText()})" to {
+                        a.pickInterval(it.name) { every, h, m ->
+                            Sched.update(a, it.id) { x -> x.everyMin = every; x.atHour = h; x.atMin = m }
+                            Sched.list(a).firstOrNull { x -> x.id == it.id }?.let { x -> Sched.plan(a, x) }
+                            back(); openSchedules()
+                        }
+                    },
+                    "페이지 열기" to { back(); a.openUrl(it.url) },
+                    "예약 지우기 (받은 그림은 남아요)" to {
+                        android.app.AlertDialog.Builder(a)
+                            .setMessage("'${it.name}' 예약을 지울까요? 이미 받은 그림은 그대로 남아요.")
+                            .setPositiveButton("지우기") { _, _ -> Sched.remove(a, it.id); back(); openSchedules() }
+                            .setNegativeButton("취소", null).show()
+                    },
+                )
+                android.app.AlertDialog.Builder(a)
+                    .setCustomTitle(a.titleView(it.name))
+                    .setItems(acts.map { x -> x.first }.toTypedArray()) { _, w -> acts[w].second() }
+                    .setNegativeButton("닫기", null)
+                    .show()
+            }
+        }
+    }
+
     fun openDownloads() {
         val box = page("다운로드", "downloads")
         val body = LinearLayout(a).apply {

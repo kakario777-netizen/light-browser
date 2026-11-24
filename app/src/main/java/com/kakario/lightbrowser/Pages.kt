@@ -569,7 +569,10 @@ class Pages(private val a: MainActivity) {
         val scheds = Sched.list(a)
 
         section(body, "지금 보는 페이지에서")
-        row(body, "페이지 넘기며 이미지 모으기", "한 장씩 넘겨 보는 만화·뷰어 페이지", null) { back(); a.menuAction(12) }
+        row(body, "이 작품 받기 (화면 꺼져도 · zip)", "지금 보는 작품 페이지를 화면 없이 받아 압축 · 목록에서는 작품을 꾸욱 눌러도 돼요", null) {
+            back(); a.currentWebView()?.url?.let { u -> if (u.startsWith("http")) a.getOne(u) }
+        }
+        if (st.showPageTurn) row(body, "페이지 넘기며 이미지 모으기", "화면을 눌러 한 장씩 넘기는 방식 (화면을 켜 둬야 해요)", null) { back(); a.menuAction(12) }
         row(body, "이미지 폴더 받기", "페이지 속 그림 폴더를 찾아 한 번에", null) { back(); a.menuAction(11) }
         row(body, "이 목록 전부 받기 (옛날 글부터)", "목록 마지막 쪽 맨 아래부터 1쪽 맨 위까지 · 화면 꺼져도 계속", null) { back(); a.menuAction(17) }
         row(body, "이 페이지 예약 저장", "정한 때마다 새 글·새 그림만 저장", null) { back(); a.menuAction(15) }
@@ -625,6 +628,9 @@ class Pages(private val a: MainActivity) {
                 a.toastMsg("설정 화면을 열 수 없어요")
             }
         }
+
+        section(body, "예전 방식")
+        switchRow(body, "넘기며 모으기 보이기", "화면을 눌러 넘기며 모으는 예전 방식 메뉴를 보이게 해요", st.showPageTurn) { st.showPageTurn = it; back(); openDownloadCenter() }
 
         section(body, "문제 확인")
         row(body, "받기 테스트 (지금 보던 페이지)", "목록이면 맨 아래 글 하나, 글이면 그 글을 화면 없이 받아 봐요", null) { back(); a.schedTest() }

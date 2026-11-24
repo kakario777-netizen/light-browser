@@ -106,6 +106,10 @@ class Store(ctx: Context) {
     var lastFilterCheck: Long
         get() = p.getLong("lastFilterCheck", 0L)
         set(v) = p.edit().putLong("lastFilterCheck", v).apply()
+    /** 넘기며 모으기(화면을 눌러 넘기는 방식) 메뉴 보이기 — 기본은 숨김 */
+    var showPageTurn: Boolean
+        get() = p.getBoolean("showPageTurn", false)
+        set(v) = p.edit().putBoolean("showPageTurn", v).apply()
     var skipBuild: Int
         get() = p.getInt("skipBuild", 0)
         set(v) = p.edit().putInt("skipBuild", v).apply()

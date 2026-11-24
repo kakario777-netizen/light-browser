@@ -1430,6 +1430,7 @@ class MainActivity : Activity() {
         // 누른 자리의 글 복사 (링크 글자, 또는 그 문단)
         val tx = lastTouchX
         val ty = lastTouchY
+        if (link != null && link.startsWith("http")) items.add(0, "⬇ 이 작품 받기 (화면 꺼져도 · zip)" to { getOne(link) })
         if (link != null) items.add("링크 글자 복사" to { textAt(wv, tx, ty, link = true) })
         items.add("이 부분 글 복사" to { textAt(wv, tx, ty, link = false) })
         if (img != null) {
@@ -2167,6 +2168,20 @@ class MainActivity : Activity() {
         m.add(0, 9, 0, "설정")
         pm.setOnMenuItemClickListener { item -> menuAction(item.itemId); true }
         pm.show()
+    }
+
+    /** 작품 하나 받기: 메인 폴더는 지금 목록의 검색어(없으면 '받은 작품') */
+    fun getOne(url: String) {
+        val wv = currentWebView()
+        val here = wv?.url ?: ""
+        wv?.evaluateJavascript(Sched.SEARCH_JS) { r ->
+            val q = try { org.json.JSONTokener(r).nextValue() as? String } catch (e: Exception) { null }
+            val s = q?.trim().orEmpty().ifBlank { Sched.searchFromUrl(here) }
+            val folder = if (s.isNotBlank()) Sched.mainName(s, here, null) else "받은 작품"
+            Sched.one(this, url, folder)
+            askBatteryOnce()
+            toast("받기 시작 · 알림창에서 진행 상황을 볼 수 있어요 (화면 꺼도 돼요)")
+        } ?: run { Sched.one(this, url, "받은 작품"); toast("받기 시작") }
     }
 
     /** 메뉴·다운로드 화면에서 같이 쓰는 동작 */

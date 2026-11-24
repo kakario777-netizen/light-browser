@@ -460,6 +460,13 @@ object Sched {
         return best[0].first to best.maxOf { it.second }
     }
 
+    /** 작품 하나 받기 (꾸욱 → '이 작품 받기'): 화면 없이 받아 zip으로. 여러 개 누르면 차례로 */
+    fun one(ctx: Context, post: String, folder: String) {
+        val req = OneTimeWorkRequestBuilder<OneWorker>()
+            .setInputData(workDataOf("post" to post, "folder" to folder)).build()
+        WorkManager.getInstance(ctx).enqueueUniqueWork("one-queue", ExistingWorkPolicy.APPEND_OR_REPLACE, req)
+    }
+
     /** 테스트: 글 하나를 지금 바로 (화면 없이) 받아 봄 */
     fun test(ctx: Context, post: String, ftp: Boolean) {
         val req = OneTimeWorkRequestBuilder<TestWorker>().setInputData(workDataOf("post" to post, "ftp" to ftp)).build()
@@ -962,6 +969,25 @@ class BackfillWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, param
             up?.close()
         }
         return Result.success()
+    }
+}
+
+/** 작품 하나 받기 */
+class OneWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {
+    override fun doWork(): Result = awake(applicationContext, "one") {
+        val ctx = applicationContext
+        val post = inputData.getString("post") ?: return@awake Result.success()
+        val folder = inputData.getString("folder")?.ifBlank { null } ?: "받은 작품"
+        goForeground(2, "여는 중…", "작품 받기 · $folder")
+        Sched.progress = { name, k -> goForeground(2, "$name\n${k}장 받음", "작품 받기 · $folder") }
+        val conf = Ftp.conf(ctx)
+        val up = if (conf.ok) Ftp.Session(conf) else null
+        val n = try { Sched.savePost(ctx, Sched.Item(2, post, folder, 0), post, up) } catch (e: Exception) { 0 }
+        up?.close()
+        Sched.progress = null
+        Sched.doneNote(ctx, Sched.Item(2000 + (System.currentTimeMillis() % 900), post, folder, 0),
+            if (n > 0) "${n}장 받아 압축 저장" + (if (up != null && up.error == null) " · FTP에도 올림" else "") else "그림을 못 받았어요")
+        Result.success()
     }
 }
 

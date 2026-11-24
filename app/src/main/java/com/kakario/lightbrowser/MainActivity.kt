@@ -143,8 +143,15 @@ class MainActivity : Activity() {
         val wv = currentWebView()
         val url = wv?.url
         if (wv == null || url == null || !url.startsWith("http")) { toast("예약할 페이지를 먼저 열어 주세요"); return }
+        wv.evaluateJavascript(Sched.SEARCH_JS) { r ->
+            val q = try { org.json.JSONTokener(r).nextValue() as? String } catch (e: Exception) { null }
+            addScheduleNamed(wv, url, Sched.mainName(q, url, wv.title))
+        }
+    }
+
+    private fun addScheduleNamed(wv: WebView, url: String, defName: String) {
         val name = EditText(this).apply {
-            setText(Sched.niceTitle(wv.title).take(80))
+            setText(defName.take(80))
             hint = "이름 (저장 폴더 이름)"
             isSingleLine = true
         }
@@ -224,7 +231,7 @@ class MainActivity : Activity() {
         val wv = currentWebView()
         val url = wv?.url
         if (wv == null || url == null || !url.startsWith("http")) { toast("받을 목록 페이지를 먼저 열어 주세요"); return }
-        wv.evaluateJavascript(Sched.LINKS_JS) { res ->
+        wv.evaluateJavascript(Sched.SEARCH_JS) { qres -> wv.evaluateJavascript(Sched.LINKS_JS) { res ->
             val raw = try { org.json.JSONTokener(res).nextValue() as? String } catch (e: Exception) { null }
             val links = Sched.parseLinks(raw)
             val shapes = Sched.postShapes(url, links)
@@ -236,7 +243,8 @@ class MainActivity : Activity() {
             }
             val pages = Sched.pageTemplate(url, Sched.parseRaw(raw))
             val posts = links.count { Sched.shape(it) in shapes }
-            val nm = Sched.niceTitle(wv.title).ifBlank { "목록" }.take(80)
+            val search = try { org.json.JSONTokener(qres).nextValue() as? String } catch (e: Exception) { null }
+            val nm = Sched.mainName(search, url, wv.title).ifBlank { "목록" }.take(80)
             AlertDialog.Builder(this)
                 .setCustomTitle(titleView("이 목록 전부 받기"))
                 .setMessage("이 쪽 글 ${posts}개" + (if (pages != null) " · 쪽 번호 ${pages.second}쪽까지 보임 (끝 쪽은 들어가서 더 찾아요)" else " · 쪽 번호는 못 찾음 (이 쪽만 받아요)") +
@@ -253,7 +261,7 @@ class MainActivity : Activity() {
                     }
                 }
                 .setNegativeButton("취소", null).show()
-        }
+        } }
     }
 
     /** 주기 고르기: 몇 분·시간마다, 또는 매일 정해진 시각들 (예: 09:00, 13:30, 22:00) */

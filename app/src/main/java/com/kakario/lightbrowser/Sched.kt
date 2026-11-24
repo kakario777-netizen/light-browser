@@ -684,6 +684,28 @@ object Sched {
         return clean((kor.maxByOrNull { p -> hangul.findAll(p).count() } ?: parts.firstOrNull() ?: s).trim())
     }
 
+    /** 페이지 위 검색창에 들어 있는 검색어 (없으면 '') */
+    const val SEARCH_JS = "(function(){var c=[].slice.call(document.querySelectorAll(" +
+        "'input[type=search],input[name=q],input[name=query],input[name=keyword],input[name=search],input[name=stx],input[name=s],input[id*=query],input[id*=search],input[class*=search]'));" +
+        "for(var i=0;i<c.length;i++){var v=(c[i].value||'').trim();if(v)return v;}" +
+        "var t=[].slice.call(document.querySelectorAll('input[type=text],input:not([type])'));for(var j=0;j<t.length;j++){var r=t[j].getBoundingClientRect();" +
+        "var v2=(t[j].value||'').trim();if(v2&&r.top<innerHeight*0.4)return v2;}return '';})()"
+
+    /** 검색어를 주소에서라도 (search.html?검색어, ?q=검색어 …) */
+    fun searchFromUrl(url: String): String {
+        val p = Uri.parse(url.substringBefore('#'))
+        listOf("q", "query", "keyword", "search", "stx", "s", "kw").forEach { k -> p.getQueryParameter(k)?.takeIf { it.isNotBlank() }?.let { return it } }
+        val q = p.encodedQuery ?: return ""
+        if (!q.contains('=')) return Uri.decode(q.replace("+", " "))
+        return ""
+    }
+
+    /** 메인 폴더 이름: 검색창 검색어 → 주소 속 검색어 → 페이지 제목 (한국어 위주) */
+    fun mainName(search: String?, url: String, title: String?): String {
+        val s = search?.trim().orEmpty().ifBlank { searchFromUrl(url) }
+        return if (s.isNotBlank()) clean(s) else niceTitle(title)
+    }
+
     private fun clean(s: String) = s.replace(Regex("[\\\\/:*?\"<>|\\n\\r\\t]"), "_").replace(Regex("\\s+"), " ").trim().trimEnd('.').ifBlank { "img" }
 
     /** 큰 파일(zip)을 다운로드/라이트 브라우저/<폴더>/에 저장 */

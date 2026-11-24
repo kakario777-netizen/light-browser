@@ -58,24 +58,35 @@ object Sched {
         var nextAt: Long = 0,
         var mode: Int = 0,          // 0: 이 페이지 그림, 1: 목록에 새 글이 올라오면 그 글의 그림
         var patterns: List<String> = emptyList(),   // 새 글 링크 모양 (mode 1)
+        var times: List<Int> = emptyList(),         // 매일 확인할 시각들 (분 단위, everyMin == 0일 때)
+        var ftp: Boolean = false,                   // FTP로도 올리기
+        var bfPage: Int = 0,                        // 처음부터 전부 받기: 지금 받는 쪽 (0이면 안 함)
+        var bfMax: Int = 0,
+        var bfTpl: String = "",                     // 쪽 주소 틀 ({N} 자리에 쪽 번호)
+        var bfText: String = "",
     ) {
         fun toJson() = JSONObject().put("id", id).put("url", url).put("name", name).put("every", everyMin)
             .put("h", atHour).put("m", atMin).put("min", minPx).put("on", enabled).put("last", lastRun)
             .put("res", lastResult).put("total", total).put("next", nextAt).put("mode", mode)
-            .put("pat", JSONArray(patterns))
+            .put("pat", JSONArray(patterns)).put("times", JSONArray(times)).put("ftp", ftp)
+            .put("bfp", bfPage).put("bfm", bfMax).put("bft", bfTpl).put("bfx", bfText)
 
         fun whenText(): String = when {
-            everyMin == 0 -> "매일 %02d:%02d".format(atHour, atMin)
+            everyMin == 0 -> "매일 " + dayTimes().joinToString(", ") { "%02d:%02d".format(it / 60, it % 60) }
             everyMin % 1440 == 0 -> "${everyMin / 1440}일마다"
             everyMin % 60 == 0 -> "${everyMin / 60}시간마다"
             else -> "${everyMin}분마다"
         }
 
+        fun dayTimes(): List<Int> = times.ifEmpty { listOf(atHour * 60 + atMin) }.sorted()
+
         companion object {
             fun of(o: JSONObject) = Item(o.getLong("id"), o.getString("url"), o.optString("name"), o.optInt("every", 180),
                 o.optInt("h", 9), o.optInt("m", 0), o.optInt("min", 300), o.optBoolean("on", true), o.optLong("last"),
                 o.optString("res"), o.optInt("total"), o.optLong("next"), o.optInt("mode"),
-                o.optJSONArray("pat")?.let { a -> List(a.length()) { a.getString(it) } } ?: emptyList())
+                o.optJSONArray("pat")?.let { a -> List(a.length()) { a.getString(it) } } ?: emptyList(),
+                o.optJSONArray("times")?.let { a -> List(a.length()) { a.getInt(it) } } ?: emptyList(),
+                o.optBoolean("ftp"), o.optInt("bfp"), o.optInt("bfm"), o.optString("bft"), o.optString("bfx"))
         }
     }
 
@@ -110,6 +121,7 @@ object Sched {
         WorkManager.getInstance(ctx).cancelUniqueWork("sched-$id")
         File(ctx.filesDir, "sched/$id.json").delete()
         File(ctx.filesDir, "sched/$id.links").delete()
+        WorkManager.getInstance(ctx).cancelUniqueWork("bf-$id")
     }
 
     /** 다음 실행 예약 (delay를 주면 그만큼 뒤에, 아니면 주기·시각대로) */
@@ -132,11 +144,14 @@ object Sched {
 
     private fun nextTime(it: Item, now: Long): Long {
         if (it.everyMin > 0) return now + it.everyMin * 60_000L
-        val c = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, it.atHour); set(Calendar.MINUTE, it.atMin); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
-        }
-        if (c.timeInMillis <= now + 60_000) c.add(Calendar.DAY_OF_MONTH, 1)
-        return c.timeInMillis
+        // 정해 둔 시각들 중 가장 가까운 다음 시각
+        return it.dayTimes().map { t ->
+            val c = Calendar.getInstance().apply {
+                set(Calendar.HOUR_OF_DAY, t / 60); set(Calendar.MINUTE, t % 60); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+            }
+            if (c.timeInMillis <= now + 60_000) c.add(Calendar.DAY_OF_MONTH, 1)
+            c.timeInMillis
+        }.min()
     }
 
     /** 앱을 켤 때: 예약이 빠져 있으면 다시 걸어 둠 (폰을 껐다 켠 경우 등) */
@@ -256,6 +271,61 @@ object Sched {
         return good.sortedByDescending { count[it] }.take(3)
     }
 
+    /**
+     * 목록 아래 쪽 번호(1 2 3 … 끝)에서 '쪽 주소 틀'과 마지막 쪽 번호를 알아냄.
+     * 목록 주소와 숫자 하나(쪽 번호)만 다른 링크들을 찾음: ?page=3 또는 /page/3 같은 것
+     */
+    fun pageTemplate(listUrl: String, links: List<String>): Pair<String, Int>? {
+        val lp = Uri.parse(listUrl)
+        val byKey = HashMap<String, MutableList<Pair<String, Int>>>()
+        for (l in links) {
+            val p = Uri.parse(l)
+            if (p.host != lp.host) continue
+            if (p.path == lp.path) {
+                // 쿼리에서 숫자 하나만 다름
+                val keys = p.queryParameterNames + lp.queryParameterNames
+                val diff = keys.filter { k -> p.getQueryParameter(k) != lp.getQueryParameter(k) }
+                if (diff.size != 1) continue
+                val k = diff[0]
+                val v = p.getQueryParameter(k)?.toIntOrNull() ?: continue
+                val tpl = lp.buildUpon().clearQuery().apply {
+                    (lp.queryParameterNames + k).forEach { q -> appendQueryParameter(q, if (q == k) "{N}" else lp.getQueryParameter(q)) }
+                }.build().toString().replace("%7BN%7D", "{N}")
+                byKey.getOrPut("q:$k") { mutableListOf() }.add(tpl to v)
+            } else {
+                // 경로에서 숫자 한 칸만 다름 (/list/3, /page/3)
+                val a = lp.pathSegments
+                val b = p.pathSegments
+                val idx: Int
+                if (b.size == a.size) {
+                    val d = a.indices.filter { i -> a[i] != b[i] }
+                    if (d.size != 1 || b[d[0]].toIntOrNull() == null) continue
+                    idx = d[0]
+                } else if (b.size == a.size + 2 && b.take(a.size) == a && b.last().toIntOrNull() != null) {
+                    idx = b.size - 1
+                } else continue
+                if (p.query != lp.query) continue
+                val segs = b.toMutableList().also { s2 -> s2[idx] = "{N}" }
+                val tpl = p.buildUpon().path("/" + segs.joinToString("/")).build().toString().replace("%7BN%7D", "{N}")
+                byKey.getOrPut("p:$tpl") { mutableListOf() }.add(tpl to b[idx].toInt())
+            }
+        }
+        val best = byKey.values.filter { it.size >= 2 }.maxByOrNull { it.size } ?: return null
+        return best[0].first to best.maxOf { it.second }
+    }
+
+    /** 처음부터 전부 받기 시작: 마지막 쪽 맨 아래 글부터 1쪽 맨 위 글까지 */
+    fun startBackfill(ctx: Context, id: Long) {
+        update(ctx, id) { x -> x.bfPage = -1; x.bfText = "쪽 수 알아보는 중…" }
+        val req = OneTimeWorkRequestBuilder<BackfillWorker>().setInputData(workDataOf("id" to id)).build()
+        WorkManager.getInstance(ctx).enqueueUniqueWork("bf-$id", ExistingWorkPolicy.REPLACE, req)
+    }
+
+    fun stopBackfill(ctx: Context, id: Long) {
+        WorkManager.getInstance(ctx).cancelUniqueWork("bf-$id")
+        update(ctx, id) { x -> x.bfPage = 0; x.bfText = "전부 받기 멈춤" }
+    }
+
     fun seenFile(ctx: Context, id: Long) = File(ctx.filesDir, "sched/$id.links").apply { parentFile?.mkdirs() }
 
     /** 등록할 때: 지금 보이는 글들은 '이미 본 것'으로 */
@@ -264,7 +334,7 @@ object Sched {
     }
 
     /** 목록을 열어 새 글을 찾고, 새 글마다 (새 탭처럼) 열어 그림을 다 받고 닫음 */
-    private fun runPosts(ctx: Context, it: Item): Pair<Int, String> {
+    private fun runPosts(ctx: Context, it: Item, up: Ftp.Session?): Pair<Int, String> {
         val (res, _) = loadAndRun(ctx, it.url, LINKS_JS, scroll = false)
         val links = parseLinks(res)
         if (links.isEmpty()) return 0 to "목록을 못 열었어요"
@@ -278,7 +348,7 @@ object Sched {
         // 오래된 글(목록 아래쪽)부터
         for (post in fresh.reversed()) {
             val one = Item(it.id, post, it.name, 0, minPx = it.minPx)
-            val (n, _) = saveImagesOf(ctx, one, folderOverride = "")
+            val (n, _) = saveImagesOf(ctx, one, folderOverride = "", up = up)
             seen.add(post)
             posts++
             pics += n.coerceAtLeast(0)
@@ -286,6 +356,10 @@ object Sched {
         }
         return pics to "새 글 ${posts}개 · 그림 ${pics}장 저장"
     }
+
+    /** 글 하나 (처음부터 전부 받기에서 씀) */
+    fun savePost(ctx: Context, it: Item, post: String, up: Ftp.Session?): Int =
+        saveImagesOf(ctx, Item(it.id, post, it.name, 0, minPx = it.minPx), folderOverride = "", up = up).first.coerceAtLeast(0)
 
     /**
      * 글 본문 그림만: 아래쪽 '다른 글' 미리보기·추천 글 썸네일은 빼기.
@@ -309,13 +383,23 @@ object Sched {
 
     /** 한 번 실행: 새 그림만 받아 저장. 결과 문구를 돌려줌 */
     fun runOnce(ctx: Context, it: Item): Pair<Int, String> {
-        if (it.mode == 1) return runPosts(ctx, it)
-        val (n, text) = saveImagesOf(ctx, it, null)
-        return n.coerceAtLeast(0) to text
+        val conf = Ftp.conf(ctx)
+        val up = if (it.ftp && conf.ok) Ftp.Session(conf) else null
+        try {
+            val (n, text) = if (it.mode == 1) runPosts(ctx, it, up) else saveImagesOf(ctx, it, null, up)
+            val ftpNote = when {
+                it.ftp && !conf.ok -> " · FTP 서버 설정이 없어요"
+                up?.error != null -> " · FTP 오류: ${up.error}"
+                else -> ""
+            }
+            return n.coerceAtLeast(0) to text + ftpNote
+        } finally {
+            up?.close()
+        }
     }
 
     /** 한 페이지를 열어 그 안의 그림을 받음. folderOverride가 있으면 '예약이름/글 제목' 폴더에 */
-    private fun saveImagesOf(ctx: Context, it: Item, folderOverride: String?): Pair<Int, String> {
+    private fun saveImagesOf(ctx: Context, it: Item, folderOverride: String?, up: Ftp.Session?): Pair<Int, String> {
         val perPost = folderOverride != null
         val (found, title) = collect(ctx, it.url, onlyPost = perPost)
         if (found.isEmpty()) return 0 to "그림을 못 찾음 (페이지가 안 열렸거나 그림이 없음)"
@@ -363,7 +447,9 @@ object Sched {
                 }
                 val base = clean(Uri.parse(u).lastPathSegment?.substringBeforeLast('.') ?: "img").take(60)
                 val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.KOREA).format(java.util.Date())
-                if (saveImage(ctx, folder, "${stamp}_${base}.$ext", if (type.startsWith("image")) type else "image/$ext", bytes)) saved++ else failed++
+                val fname = "${stamp}_${base}.$ext"
+                if (saveImage(ctx, folder, fname, if (type.startsWith("image")) type else "image/$ext", bytes)) saved++ else failed++
+                up?.upload(folder, fname, bytes)
             } catch (e: Exception) {
                 failed++
             }
@@ -433,19 +519,108 @@ object Sched {
     }
 }
 
+/** 화면이 꺼져도 받는 동안 폰이 잠들지 않게 */
+private inline fun <T> awake(ctx: Context, tag: String, f: () -> T): T {
+    val wl = (ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager)
+        .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "lightbrowser:$tag").apply { setReferenceCounted(false); acquire(60 * 60 * 1000L) }
+    try { return f() } finally { runCatching { wl.release() } }
+}
+
+private fun Worker.goForeground(id: Long, text: String) {
+    try {
+        val n = Sched.working(applicationContext, text)
+        val info = if (Build.VERSION.SDK_INT >= 29)
+            ForegroundInfo(4100 + (id % 100).toInt(), n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        else ForegroundInfo(4100 + (id % 100).toInt(), n)
+        setForegroundAsync(info).get()
+    } catch (e: Exception) {
+    }
+}
+
+/**
+ * 처음부터 전부 받기: 마지막 쪽 → 1쪽, 쪽마다 맨 아래 글 → 맨 위 글 순서로.
+ * 글 하나 받을 때마다 어디까지 했는지 저장해서, 끊겨도 그 다음부터 이어 받음.
+ * 오래 걸리니 30개쯤마다 끊어서 다시 이어 돌림.
+ */
+class BackfillWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {
+    override fun doWork(): Result = awake(applicationContext, "backfill") { work() }
+
+    private fun work(): Result {
+        val ctx = applicationContext
+        val id = inputData.getLong("id", -1)
+        var it = Sched.list(ctx).firstOrNull { x -> x.id == id } ?: return Result.success()
+        goForeground(id, "${it.name} · 처음부터 전부 받기")
+        if (it.bfPage <= 0 || it.bfTpl.isEmpty()) {
+            // 처음: 목록에서 쪽 주소 틀과 마지막 쪽 찾기
+            val (res, _) = Sched.loadAndRun(ctx, it.url, Sched.LINKS_JS, scroll = false)
+            val tpl = Sched.pageTemplate(it.url, Sched.parseLinks(res))
+            if (tpl == null) {
+                Sched.update(ctx, id) { x -> x.bfPage = 0; x.bfText = "목록 아래 쪽 번호를 못 찾았어요" }
+                return Result.success()
+            }
+            // 쪽 번호 줄에 끝 쪽이 다 안 보일 수 있어서, 마지막으로 보인 쪽을 열어 더 큰 번호가 있는지 몇 번 더 확인
+            var max = tpl.second
+            for (r in 0 until 8) {
+                val (r2, _) = Sched.loadAndRun(ctx, tpl.first.replace("{N}", max.toString()), Sched.LINKS_JS, scroll = false)
+                val more = Sched.pageTemplate(it.url, Sched.parseLinks(r2))?.second ?: 0
+                if (more <= max) break
+                max = more
+            }
+            Sched.update(ctx, id) { x -> x.bfTpl = tpl.first; x.bfMax = max; x.bfPage = max; x.bfText = "마지막 ${max}쪽부터 시작" }
+            it = Sched.list(ctx).first { x -> x.id == id }
+        }
+        val conf = Ftp.conf(ctx)
+        val up = if (it.ftp && conf.ok) Ftp.Session(conf) else null
+        var done = 0
+        try {
+            val seenF = Sched.seenFile(ctx, id)
+            val seen = LinkedHashSet<String>()
+            try { org.json.JSONArray(seenF.readText()).let { a -> for (i in 0 until a.length()) seen.add(a.getString(i)) } } catch (e: Exception) {}
+            val shapes = it.patterns.toSet()
+            var page = it.bfPage
+            while (page >= 1 && !isStopped) {
+                val (res, _) = Sched.loadAndRun(ctx, it.bfTpl.replace("{N}", page.toString()), Sched.LINKS_JS, scroll = false)
+                val posts = Sched.parseLinks(res).filter { l -> shapes.isEmpty() || Sched.shape(l) in shapes }
+                // 쪽 안에서는 맨 아래(오래된) 글부터
+                for (post in posts.reversed()) {
+                    if (isStopped) return Result.success()
+                    if (post in seen) continue
+                    val n = Sched.savePost(ctx, it, post, up)
+                    seen.add(post)
+                    done++
+                    runCatching { seenF.writeText(org.json.JSONArray(seen.toList().takeLast(50000)).toString()) }
+                    Sched.update(ctx, id) { x -> x.total += n; x.bfText = "${page}쪽 받는 중 (${it.bfMax}쪽 중) · 이번에 글 ${done}개" }
+                    if (done >= 30) {
+                        // 너무 오래 붙잡지 않게 끊고 이어서 다시
+                        Sched.update(ctx, id) { x -> x.bfPage = page }
+                        WorkManager.getInstance(ctx).enqueueUniqueWork("bf-$id", ExistingWorkPolicy.APPEND_OR_REPLACE,
+                            OneTimeWorkRequestBuilder<BackfillWorker>().setInputData(workDataOf("id" to id)).build())
+                        return Result.success()
+                    }
+                }
+                page--
+                Sched.update(ctx, id) { x -> x.bfPage = page.coerceAtLeast(0) }
+            }
+            if (page < 1) {
+                Sched.update(ctx, id) { x -> x.bfPage = 0; x.bfText = "처음부터 전부 받기 끝 (${it.bfMax}쪽)" }
+                Sched.list(ctx).firstOrNull { x -> x.id == id }?.let { x -> Sched.doneNote(ctx, x, "처음부터 전부 받기 끝 · ${it.bfMax}쪽") }
+            }
+        } finally {
+            up?.close()
+        }
+        return Result.success()
+    }
+}
+
 /** 예약된 때가 되면 깨어나서 한 번 실행하고, 다음 실행을 다시 예약 */
 class SchedWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {
-    override fun doWork(): Result {
+    override fun doWork(): Result = awake(applicationContext, "sched") { work() }
+
+    private fun work(): Result {
         val id = inputData.getLong("id", -1)
         val it = Sched.list(applicationContext).firstOrNull { x -> x.id == id } ?: return Result.success()
         if (!it.enabled) return Result.success()
-        try {
-            val info = if (Build.VERSION.SDK_INT >= 29)
-                ForegroundInfo(4100 + (id % 100).toInt(), Sched.working(applicationContext, it.name), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-            else ForegroundInfo(4100 + (id % 100).toInt(), Sched.working(applicationContext, it.name))
-            setForegroundAsync(info).get()
-        } catch (e: Exception) {
-        }
+        goForeground(id, it.name)
         val (n, text) = try { Sched.runOnce(applicationContext, it) } catch (e: Exception) { 0 to "실패: ${e.message ?: e.javaClass.simpleName}" }
         Sched.update(applicationContext, id) { x ->
             x.lastRun = System.currentTimeMillis()

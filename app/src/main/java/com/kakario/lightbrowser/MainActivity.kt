@@ -135,8 +135,8 @@ class MainActivity : Activity() {
 
     // ---------------- 예약 저장 ----------------
 
-    private val schedChoices = listOf(30 to "30분마다", 60 to "1시간마다", 180 to "3시간마다", 360 to "6시간마다",
-        720 to "12시간마다", 1440 to "하루마다", 0 to "매일 정해진 시각…")
+    private val schedChoices = listOf(0 to "매일 정해진 시각에 (여러 개 가능)…", 30 to "30분마다", 60 to "1시간마다",
+        180 to "3시간마다", 360 to "6시간마다", 720 to "12시간마다", 1440 to "하루마다")
 
     /** 지금 페이지를 예약 저장에 추가 */
     fun addSchedule() {
@@ -170,10 +170,12 @@ class MainActivity : Activity() {
                 AlertDialog.Builder(this)
                     .setCustomTitle(titleView("$nm · 무엇을 받을까요?"))
                     .setItems(modes) { _, w ->
-                        if (w == 1) pickInterval(nm) { every, h, m ->
-                            Sched.add(this, Sched.Item(System.currentTimeMillis(), url, nm, every, h, m), runNow = true)
-                            askBatteryOnce()
-                            toast("예약했어요 · 지금 한 번 바로 받아 볼게요")
+                        if (w == 1) pickInterval(nm) { every, times ->
+                            schedOptions(nm, test = false) { ftp, _ ->
+                                Sched.add(this, Sched.Item(System.currentTimeMillis(), url, nm, every, times = times, ftp = ftp), runNow = true)
+                                askBatteryOnce()
+                                toast("예약했어요 · 지금 한 번 바로 받아 볼게요")
+                            }
                         } else addPostSchedule(wv, url, nm)
                     }
                     .setNegativeButton("취소", null).show()
@@ -201,29 +203,118 @@ class MainActivity : Activity() {
                     "새 글이 보이면 그 글을 (화면 없이) 새 탭처럼 열어 그림을 전부 저장하고 닫은 뒤, 다음 새 글도 똑같이 해요.\n" +
                     "저장 위치: 다운로드/라이트 브라우저/$nm/글 제목/")
                 .setPositiveButton("다음") { _, _ ->
-                    pickInterval(nm) { every, h, m ->
-                        val id = System.currentTimeMillis()
-                        Sched.baseline(this, id, links)
-                        Sched.add(this, Sched.Item(id, url, nm, every, h, m, mode = 1, patterns = shapes), runNow = false)
-                        askBatteryOnce()
-                        toast("예약했어요 · 새 글이 올라오면 받아요")
+                    pickInterval(nm) { every, times ->
+                        schedOptions(nm, test = true) { ftp, test ->
+                            val id = System.currentTimeMillis()
+                            val postLinks = links.filter { Sched.shape(it) in shapes }
+                            // 테스트: 목록 맨 아래 글 하나는 '아직 안 본 것'으로 두고 바로 받아 봄
+                            Sched.baseline(this, id, if (test && postLinks.isNotEmpty()) links - postLinks.last() else links)
+                            Sched.add(this, Sched.Item(id, url, nm, every, times = times, mode = 1, patterns = shapes, ftp = ftp), runNow = test)
+                            askBatteryOnce()
+                            toast(if (test) "예약했어요 · 지금 맨 아래 글 하나를 받아 볼게요 (화면 꺼도 돼요)" else "예약했어요 · 새 글이 올라오면 받아요")
+                        }
                     }
                 }
                 .setNegativeButton("취소", null).show()
         }
     }
 
-    /** 주기 고르기 (매일 정해진 시각이면 시각까지) */
-    fun pickInterval(title: String, done: (Int, Int, Int) -> Unit) {
+    /** 주기 고르기: 몇 분·시간마다, 또는 매일 정해진 시각들 (예: 09:00, 13:30, 22:00) */
+    fun pickInterval(title: String, current: List<Int> = emptyList(), done: (Int, List<Int>) -> Unit) {
         AlertDialog.Builder(this)
-            .setCustomTitle(titleView("$title · 얼마나 자주?"))
+            .setCustomTitle(titleView("$title · 언제 확인할까요?"))
             .setItems(schedChoices.map { it.second }.toTypedArray()) { _, w ->
                 val every = schedChoices[w].first
-                if (every > 0) done(every, 9, 0)
-                else android.app.TimePickerDialog(this, { _, h, m -> done(0, h, m) }, 9, 0, true).show()
+                if (every > 0) { done(every, emptyList()); return@setItems }
+                val et = EditText(this).apply {
+                    hint = "예: 09:00, 13:30, 22:00"
+                    setText(current.joinToString(", ") { "%02d:%02d".format(it / 60, it % 60) }.ifEmpty { "09:00, 21:00" })
+                }
+                val box = LinearLayout(this).apply { setPadding(dp(24), dp(8), dp(24), 0); addView(et, LinearLayout.LayoutParams(-1, -2)) }
+                AlertDialog.Builder(this)
+                    .setTitle("매일 확인할 시각")
+                    .setMessage("쉼표로 여러 개 넣을 수 있어요 (24시간 형식)")
+                    .setView(box)
+                    .setPositiveButton("확인") { _, _ ->
+                        val ts = Regex("(\\d{1,2})\\s*[:시.]\\s*(\\d{0,2})").findAll(et.text.toString()).mapNotNull { m ->
+                            val h = m.groupValues[1].toInt()
+                            val mi = m.groupValues[2].ifEmpty { "0" }.toInt()
+                            if (h in 0..23 && mi in 0..59) h * 60 + mi else null
+                        }.distinct().sorted().toList()
+                        if (ts.isEmpty()) toast("시각을 못 알아봤어요 (예: 09:00, 21:30)") else done(0, ts)
+                    }
+                    .setNegativeButton("취소", null).show()
             }
             .setNegativeButton("취소", null)
             .show()
+    }
+
+    /** 예약 마지막 단계: FTP로도 올리기, (새 글 받기면) 지금 맨 아래 글 하나로 테스트 */
+    private fun schedOptions(title: String, test: Boolean, done: (Boolean, Boolean) -> Unit) {
+        val conf = Ftp.conf(this)
+        val ftp = android.widget.CheckBox(this).apply {
+            text = if (conf.ok) "FTP로도 올리기 (${conf.host})" else "FTP로도 올리기 (설정 › 예약 저장 FTP에서 서버를 먼저 넣어 주세요)"
+            isChecked = conf.ok
+            isEnabled = conf.ok
+        }
+        val t = android.widget.CheckBox(this).apply {
+            text = "테스트: 지금 목록 맨 아래(가장 오래된) 글 하나를 바로 받아 보기"
+            isChecked = true
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), 0)
+            addView(ftp)
+            if (test) addView(t)
+        }
+        AlertDialog.Builder(this)
+            .setCustomTitle(titleView("$title · 마지막으로"))
+            .setView(box)
+            .setPositiveButton("예약하기") { _, _ -> done(ftp.isChecked, test && t.isChecked) }
+            .setNegativeButton("취소", null).show()
+    }
+
+    /** 설정 › 예약 저장 FTP 서버 */
+    fun editFtp() {
+        val c = Ftp.conf(this)
+        fun field(hint: String, v: String, pass: Boolean = false, num: Boolean = false) = EditText(this).apply {
+            this.hint = hint
+            setText(v)
+            isSingleLine = true
+            if (pass) inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            if (num) inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        }
+        val host = field("서버 주소 (예: 192.168.0.10 또는 my.nas.com)", c.host)
+        val port = field("포트 (보통 21)", c.port.toString(), num = true)
+        val user = field("아이디", c.user)
+        val pass = field("비밀번호", c.pass, pass = true)
+        val dir = field("올릴 폴더 (예: /사진/라이트 브라우저)", c.dir)
+        val passive = android.widget.CheckBox(this).apply { text = "패시브 모드 (잘 안 되면 끄거나 켜 보세요)"; isChecked = c.passive }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), 0)
+            listOf(host, port, user, pass, dir, passive).forEach { addView(it) }
+        }
+        fun read() = Ftp.Conf(host.text.toString(), port.text.toString().toIntOrNull() ?: 21, user.text.toString(),
+            pass.text.toString(), dir.text.toString().ifBlank { "/" }, passive.isChecked)
+        val d = AlertDialog.Builder(this)
+            .setTitle("예약 저장 FTP 서버")
+            .setView(android.widget.ScrollView(this).apply { addView(box) })
+            .setPositiveButton("저장") { _, _ -> Ftp.save(this, read()); toast("저장했어요") }
+            .setNeutralButton("연결 테스트", null)
+            .setNegativeButton("취소", null)
+            .create()
+        d.setOnShowListener {
+            d.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                val conf = read()
+                toast("연결해 보는 중…")
+                Thread {
+                    val r = Ftp.test(conf)
+                    runOnUiThread { AlertDialog.Builder(this).setMessage(r).setPositiveButton("확인", null).show() }
+                }.start()
+            }
+        }
+        d.show()
     }
 
     /** 화면 꺼진 채로 제때 돌려면 배터리 최적화에서 빼는 게 좋음 (한 번만 물어봄) */

@@ -224,6 +224,10 @@ class Pages(private val a: MainActivity) {
         section(body, "기록")
         row(body, "방문 기록", null, null) { a.showHistory() }
 
+        section(body, "예약 저장")
+        row(body, "예약 저장 목록", "정한 때마다 화면 꺼진 채로 새 그림·새 글을 저장", null) { back(); openSchedules() }
+        row(body, "예약 저장 FTP 서버", Ftp.conf(a).let { c -> if (c.ok) "${c.host}:${c.port} · ${c.dir}" else "설정 안 됨 · 넣으면 받은 그림을 FTP로도 올려요" }, null) { a.editFtp() }
+
         section(body, "앱 정보")
         row(body, "업데이트 확인", "지금 빌드 ${a.updater.myBuild()}", null) { a.updater.check(silent = false) }
         switchRow(body, "자동으로 업데이트 확인", "앱을 켤 때 새 버전이 있으면 알려줘요", st.autoUpdate) { st.autoUpdate = it }
@@ -509,7 +513,8 @@ class Pages(private val a: MainActivity) {
         section(body, "예약 ${items.size}개 · 다운로드/라이트 브라우저/ 에 저장")
         items.forEach { it ->
             val state = (if (it.mode == 1) "새 글 받기 · " else "이 페이지 그림 · ") + if (!it.enabled) "꺼짐" else it.whenText() + (if (it.nextAt > 0) " · 다음 ${fmt.format(java.util.Date(it.nextAt))}" else "")
-            val last = if (it.lastRun > 0) "\n마지막 ${fmt.format(java.util.Date(it.lastRun))}: ${it.lastResult} · 모두 ${it.total}장" else "\n아직 안 돌았어요"
+            val bf = if (it.bfPage != 0 || it.bfText.isNotEmpty()) "\n전부 받기: ${it.bfText}" else ""
+            val last = (if (it.ftp) " · FTP" else "") + bf + if (it.lastRun > 0) "\n마지막 ${fmt.format(java.util.Date(it.lastRun))}: ${it.lastResult} · 모두 ${it.total}장" else "\n아직 안 돌았어요"
             row(body, it.name, state + last, null) {
                 val acts = listOf<Pair<String, () -> Unit>>(
                     "지금 한 번 받기" to { Sched.plan(a, it, 1000L); a.toastMsg("곧 받기 시작해요 (알림으로 알려드려요)") },
@@ -518,14 +523,28 @@ class Pages(private val a: MainActivity) {
                         Sched.list(a).firstOrNull { x -> x.id == it.id }?.let { x -> Sched.plan(a, x) }
                         back(); openSchedules()
                     },
-                    "얼마나 자주 바꾸기 (지금: ${it.whenText()})" to {
-                        a.pickInterval(it.name) { every, h, m ->
-                            Sched.update(a, it.id) { x -> x.everyMin = every; x.atHour = h; x.atMin = m }
+                    (if (it.ftp) "FTP로 올리기 끄기" else "FTP로도 올리기") to {
+                        if (!it.ftp && !Ftp.conf(a).ok) { a.toastMsg("설정 › 예약 저장 FTP에서 서버를 먼저 넣어 주세요"); a.editFtp() }
+                        else { Sched.update(a, it.id) { x -> x.ftp = !x.ftp }; back(); openSchedules() }
+                    },
+                    "언제 확인할지 바꾸기 (지금: ${it.whenText()})" to {
+                        a.pickInterval(it.name, it.times) { every, times ->
+                            Sched.update(a, it.id) { x -> x.everyMin = every; x.times = times }
                             Sched.list(a).firstOrNull { x -> x.id == it.id }?.let { x -> Sched.plan(a, x) }
                             back(); openSchedules()
                         }
                     },
                     "페이지 열기" to { back(); a.openUrl(it.url) },
+                    *(if (it.mode != 1) emptyArray() else if (it.bfPage != 0) arrayOf<Pair<String, () -> Unit>>(
+                        "처음부터 전부 받기 멈추기 (지금 ${it.bfText})" to { Sched.stopBackfill(a, it.id); back(); openSchedules() })
+                    else arrayOf<Pair<String, () -> Unit>>(
+                        "처음부터 전부 받기 (마지막 쪽 맨 아래 → 1쪽 맨 위)" to {
+                            android.app.AlertDialog.Builder(a)
+                                .setTitle("처음부터 전부 받기")
+                                .setMessage("목록 아래 쪽 번호에서 마지막 쪽을 찾아, 그 쪽 맨 아래(가장 오래된) 글부터 1쪽 맨 위 글까지 차례로 받아요.\n이미 받은 글은 건너뛰고, 화면이 꺼져도 계속하고, 끊기면 이어서 해요.")
+                                .setPositiveButton("시작") { _, _ -> Sched.startBackfill(a, it.id); a.toastMsg("시작했어요 · 목록에서 진행 상황을 볼 수 있어요"); back(); openSchedules() }
+                                .setNegativeButton("취소", null).show()
+                        })),
                     "예약 지우기 (받은 그림은 남아요)" to {
                         android.app.AlertDialog.Builder(a)
                             .setMessage("'${it.name}' 예약을 지울까요? 이미 받은 그림은 그대로 남아요.")

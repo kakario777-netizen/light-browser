@@ -48,6 +48,7 @@ dependencies {
     implementation("androidx.webkit:webkit:1.12.1")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("androidx.work:work-runtime-ktx:2.9.1")
+    implementation("commons-net:commons-net:3.11.1")
     // 실시간 만화 번역: 글자 인식(구글 플레이 서비스가 처음 쓸 때 받음), 번역(모델은 쓸 때 받음), 고급 번역(모델은 따로 받음)
     implementation("com.google.android.gms:play-services-mlkit-text-recognition-japanese:16.0.1")
     implementation("com.google.mlkit:translate:17.0.3")

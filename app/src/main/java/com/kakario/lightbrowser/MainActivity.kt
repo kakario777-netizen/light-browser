@@ -917,7 +917,9 @@ class MainActivity : Activity() {
         }
         val menuBtn = iconBtn(R.drawable.ic_menu, "메뉴") {}
         menuBtn.setOnClickListener { showMenu(menuBtn) }
-        listOf(backBtn, fwdBtn, homeBtn, tabsWrap, menuBtn).forEach {
+        // 다운로드: 받기·모으기·예약·다운로드 설정을 한곳에
+        val dlBtn = iconBtn(R.drawable.ic_download, "다운로드") { leaveAddress(); closeOverlays(); pages.openDownloadCenter() }
+        listOf(backBtn, fwdBtn, homeBtn, tabsWrap, dlBtn, menuBtn).forEach {
             bottom.addView(it, LinearLayout.LayoutParams(0, dp(48), 1f))
         }
 
@@ -2156,20 +2158,20 @@ class MainActivity : Activity() {
         val pm = PopupMenu(this, anchor)
         val m = pm.menu
         m.add(0, 1, 0, "새 탭")
-        m.add(0, 4, 0, "다운로드")
         m.add(0, 3, 0, "방문 기록")
         m.add(0, 5, 0, "페이지 공유")
         m.add(0, 6, 0, "데스크톱 모드").apply { isCheckable = true; isChecked = t.desktop }
-        m.add(0, 11, 0, "이미지 폴더 받기")
-        m.add(0, 12, 0, "페이지 넘기며 이미지 모으기")
-        m.add(0, 14, 0, "받다 멈춘 작업")
-        m.add(0, 17, 0, "이 목록 전부 받기 (옛날 글부터)")
-        m.add(0, 15, 0, "이 페이지 예약 저장")
-        m.add(0, 16, 0, "전부 받기 · 예약 목록")
         m.add(0, 13, 0, "실시간 번역 (일본어 → 한국어)").apply { isCheckable = true; isChecked = live.isOn }
         m.add(0, 9, 0, "설정")
-        pm.setOnMenuItemClickListener { item ->
-            when (item.itemId) {
+        pm.setOnMenuItemClickListener { item -> menuAction(item.itemId); true }
+        pm.show()
+    }
+
+    /** 메뉴·다운로드 화면에서 같이 쓰는 동작 */
+    fun menuAction(id: Int) {
+        val t = tab
+        run {
+            when (id) {
                 1 -> newTab(null)
                 3 -> showHistory()
                 4 -> pages.openDownloads()
@@ -2186,10 +2188,9 @@ class MainActivity : Activity() {
                 15 -> addSchedule()
                 17 -> fullList()
                 16 -> { closeOverlays(); pages.openSchedules() }
+                18 -> { closeOverlays(); grabber.openList() }
             }
-            true
         }
-        pm.show()
     }
 
     /** 탭을 바꿀 때 이전 탭을 멈춤 (넘기며 모으는 탭은 계속 돌아가게 둠) */

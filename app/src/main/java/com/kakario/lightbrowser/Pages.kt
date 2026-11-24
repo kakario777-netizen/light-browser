@@ -72,22 +72,37 @@ class Pages(private val a: MainActivity) {
         return box
     }
 
+    /** 섹션마다 둥근 카드 하나: 그 아래 줄들은 카드 안에 (구분선으로 나눔) */
+    private val cards = java.util.WeakHashMap<LinearLayout, LinearLayout>()
+
     private fun section(parent: LinearLayout, title: String) {
         parent.addView(TextView(a).apply {
             text = title
             textSize = 13f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(a.getColor(R.color.accent))
-            setPadding(a.dp(20), a.dp(18), a.dp(20), a.dp(6))
+            setPadding(a.dp(28), a.dp(22), a.dp(20), a.dp(8))
         })
+        val card = LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            background = android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = a.dp(16).toFloat()
+                setColor(a.getColor(R.color.field))
+            }
+            clipToOutline = true
+        }
+        parent.addView(card, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(a.dp(14), 0, a.dp(14), a.dp(2))
+        })
+        cards[parent] = card
     }
 
     private fun row(parent: LinearLayout, title: String, sub: String?, right: View?, onClick: (() -> Unit)?): TextView? {
         val r = LinearLayout(a).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(a.dp(20), a.dp(12), a.dp(16), a.dp(12))
-            minimumHeight = a.dp(56)
+            setPadding(a.dp(18), a.dp(14), a.dp(14), a.dp(14))
+            minimumHeight = a.dp(58)
             if (onClick != null) {
                 a.ripple(this)
                 setOnClickListener { onClick() }
@@ -112,7 +127,12 @@ class Pages(private val a: MainActivity) {
         }
         r.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         if (right != null) r.addView(right)
-        parent.addView(r)
+        val card = cards[parent]
+        if (card != null) {
+            if (card.childCount > 0) card.addView(View(a).apply { setBackgroundColor(a.getColor(R.color.line)) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1).apply { setMargins(a.dp(18), 0, a.dp(18), 0) })
+            card.addView(r)
+        } else parent.addView(r)
         return subView
     }
 
@@ -140,14 +160,6 @@ class Pages(private val a: MainActivity) {
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         val st = a.store
 
-        section(body, "테스트")
-        row(body, "예약 저장 테스트 (지금 보던 페이지)",
-            "목록이면 맨 아래(가장 오래된) 글 하나를, 글이면 그 글의 본문 그림을 화면 없이 받아 봐요. 받는 동안 화면을 꺼 보세요.", null) {
-            back()
-            a.schedTest()
-        }
-        row(body, "지난 테스트 기록 보기", "무슨 일이 있었는지 한 줄씩 · 복사해서 채팅에 붙여 주세요", null) { a.showTestLog() }
-
         section(body, "광고 · 차단")
         switchRow(body, "광고 차단", "광고 서버·광고 칸·광고 팝업을 막아요", a.adblockOn) { a.setAdblock(it) }
         switchRow(body, "차단 우회 (보안 DNS)", "막힌 사이트 접속을 시도해요", st.bypass) {
@@ -155,51 +167,8 @@ class Pages(private val a: MainActivity) {
             a.applyBypass(it, reload = true)
         }
 
-        section(body, "이미지 받기")
-        val zipNames = arrayOf("물어보기", "자동으로 압축하고 이미지 지우기", "그냥 두기")
-        var zipSub: TextView? = null
-        zipSub = row(body, "다 받으면 압축 (실패가 없을 때)", zipNames[st.autoZip.coerceIn(0, 2)], null) {
-            AlertDialog.Builder(a)
-                .setTitle("다 받으면 압축")
-                .setSingleChoiceItems(zipNames, st.autoZip.coerceIn(0, 2)) { d, w ->
-                    st.autoZip = w
-                    zipSub?.text = zipNames[w]
-                    d.dismiss()
-                }.show()
-        }
-
-        section(body, "백그라운드 작업")
-        row(body, "미니 창 (홈에서도 계속 모으기)",
-            if (a.mini.canUse()) "허용됨 · 앱을 나가면 모으는 페이지가 작은 창으로 떠요" else "꺼짐 · 눌러서 '다른 앱 위에 표시' 허용", null) {
-            a.mini.askPermission()
-        }
-        row(body, "배터리 최적화에서 빼기", "화면이 꺼져도 작업이 끊기지 않게", null) {
-            try {
-                @android.annotation.SuppressLint("BatteryLife")
-                val i = android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                    android.net.Uri.parse("package:" + a.packageName))
-                a.startActivity(i)
-            } catch (e: Exception) {
-                a.toastMsg("설정 화면을 열 수 없어요")
-            }
-        }
-
         section(body, "다운로드")
-        row(body, "다운로드 보기", "받는 중인 파일과 받은 파일", null) { openDownloads() }
-        var folderSub: TextView? = null
-        folderSub = row(body, "다운로드 폴더", folderName(st.downloadTree), null) {
-            AlertDialog.Builder(a)
-                .setTitle("다운로드 폴더")
-                .setItems(arrayOf("폴더 고르기", "기본 폴더(Download)로")) { _, w ->
-                    if (w == 0) a.pickDownloadFolder { folderSub?.text = folderName(st.downloadTree) }
-                    else {
-                        st.downloadTree = null
-                        folderSub?.text = folderName(null)
-                    }
-                }.show()
-        }
-        switchRow(body, "다운로드 차단 해제", "광고 차단에 걸리는 주소라도 파일은 받고, 사이트 안에서 만든 파일(blob)도 저장해요",
-            st.unblockDownloads) { st.unblockDownloads = it }
+        row(body, "다운로드 · 받기 설정", "아래쪽 다운로드 버튼에 모아 뒀어요 (폴더·압축·예약·FTP)", null) { back(); openDownloadCenter() }
 
         section(body, "화면 · 검색")
         var zoomSub: TextView? = null
@@ -231,10 +200,6 @@ class Pages(private val a: MainActivity) {
 
         section(body, "기록")
         row(body, "방문 기록", null, null) { a.showHistory() }
-
-        section(body, "예약 저장")
-        row(body, "예약 저장 목록", "정한 때마다 화면 꺼진 채로 새 그림·새 글을 저장", null) { back(); openSchedules() }
-        row(body, "예약 저장 FTP 서버", Ftp.conf(a).let { c -> if (c.ok) "${c.host}:${c.port} · ${c.dir}" else "설정 안 됨 · 넣으면 받은 그림을 FTP로도 올려요" }, null) { a.editFtp() }
 
         section(body, "앱 정보")
         row(body, "업데이트 확인", "지금 빌드 ${a.updater.myBuild()}", null) { a.updater.check(silent = false) }
@@ -585,6 +550,85 @@ class Pages(private val a: MainActivity) {
                     .show()
             }
         }
+    }
+
+    // ================= 다운로드 (아래 다운로드 버튼) =================
+
+    fun openDownloadCenter() {
+        val box = page("다운로드", "dlcenter")
+        val body = LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, a.dp(28))
+        }
+        box.addView(FastScroll.wrap(ScrollView(a).apply { addView(body) }),
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        val st = a.store
+        val jobs = JobStore.jobs
+        val active = jobs.count { it.active }
+        val saves = CollectSaves.list().size
+        val scheds = Sched.list(a)
+
+        section(body, "지금 보는 페이지에서")
+        row(body, "페이지 넘기며 이미지 모으기", "한 장씩 넘겨 보는 만화·뷰어 페이지", null) { back(); a.menuAction(12) }
+        row(body, "이미지 폴더 받기", "페이지 속 그림 폴더를 찾아 한 번에", null) { back(); a.menuAction(11) }
+        row(body, "이 목록 전부 받기 (옛날 글부터)", "목록 마지막 쪽 맨 아래부터 1쪽 맨 위까지 · 화면 꺼져도 계속", null) { back(); a.menuAction(17) }
+        row(body, "이 페이지 예약 저장", "정한 때마다 새 글·새 그림만 저장", null) { back(); a.menuAction(15) }
+
+        section(body, "받는 중 · 받은 것")
+        row(body, "작업 현황", if (active > 0) "받는 중 ${active}개 · 모두 ${jobs.size}개" else "이미지 받기 작업 ${jobs.size}개", null) { a.menuAction(18) }
+        row(body, "받다 멈춘 작업", if (saves > 0) "저장해 둔 작업 ${saves}개" else "멈춘 작업 이어 받기·정리", null) { openStopped() }
+        row(body, "전부 받기 · 예약 목록", "전부 받기 ${scheds.count { it.full }}개 · 예약 ${scheds.count { !it.full }}개", null) { openSchedules() }
+        row(body, "파일 다운로드", "받는 중인 파일과 받은 파일", null) { openDownloads() }
+
+        section(body, "저장 · 압축")
+        var folderSub: TextView? = null
+        folderSub = row(body, "다운로드 폴더", folderName(st.downloadTree), null) {
+            AlertDialog.Builder(a)
+                .setTitle("다운로드 폴더")
+                .setItems(arrayOf("폴더 고르기", "기본 폴더(Download)로")) { _, w ->
+                    if (w == 0) a.pickDownloadFolder { folderSub?.text = folderName(st.downloadTree) }
+                    else {
+                        st.downloadTree = null
+                        folderSub?.text = folderName(null)
+                    }
+                }.show()
+        }
+        val zipNames = arrayOf("물어보기", "자동으로 압축하고 이미지 지우기", "그냥 두기")
+        var zipSub: TextView? = null
+        zipSub = row(body, "이미지 다 받으면 압축 (실패가 없을 때)", zipNames[st.autoZip.coerceIn(0, 2)], null) {
+            AlertDialog.Builder(a)
+                .setTitle("다 받으면 압축")
+                .setSingleChoiceItems(zipNames, st.autoZip.coerceIn(0, 2)) { d, w ->
+                    st.autoZip = w
+                    zipSub?.text = zipNames[w]
+                    d.dismiss()
+                }.show()
+        }
+        switchRow(body, "다운로드 차단 해제", "광고 차단에 걸리는 주소라도 파일은 받고, 사이트 안에서 만든 파일(blob)도 저장해요",
+            st.unblockDownloads) { st.unblockDownloads = it }
+
+        section(body, "FTP 올리기")
+        row(body, "FTP 서버", Ftp.conf(a).let { c -> if (c.ok) "${c.host}:${c.port} · ${c.dir} · ${c.enc}" else "설정 안 됨 · 넣으면 예약·전부 받기 결과를 FTP로도 올려요" }, null) { a.editFtp() }
+
+        section(body, "화면 꺼져도 계속 받기")
+        row(body, "미니 창 (홈에서도 계속 모으기)",
+            if (a.mini.canUse()) "허용됨 · 앱을 나가면 모으는 페이지가 작은 창으로 떠요" else "꺼짐 · 눌러서 '다른 앱 위에 표시' 허용", null) {
+            a.mini.askPermission()
+        }
+        row(body, "배터리 최적화에서 빼기", "화면이 꺼져도 작업이 끊기지 않게", null) {
+            try {
+                @android.annotation.SuppressLint("BatteryLife")
+                val i = android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    android.net.Uri.parse("package:" + a.packageName))
+                a.startActivity(i)
+            } catch (e: Exception) {
+                a.toastMsg("설정 화면을 열 수 없어요")
+            }
+        }
+
+        section(body, "문제 확인")
+        row(body, "받기 테스트 (지금 보던 페이지)", "목록이면 맨 아래 글 하나, 글이면 그 글을 화면 없이 받아 봐요", null) { back(); a.schedTest() }
+        row(body, "지난 테스트 기록", "복사해서 채팅에 붙여 주세요", null) { a.showTestLog() }
     }
 
     fun openDownloads() {

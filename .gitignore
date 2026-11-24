@@ -9,5 +9,6 @@
 .externalNativeBuild/
 .cxx/
 *.apk
-!app/debug.keystore
+*.keystore
+*.jks
 /app/src/main/assets/adblock/

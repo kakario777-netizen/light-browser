@@ -178,14 +178,120 @@ object Sched {
         val m = LinkedHashMap<String, Int>()
         try {
             val o = JSONObject(res)
+            lastReader = null
             o.keys().forEach { key ->
-                if (key.startsWith("__")) rlog("페이지 분석: ${o.optString(key)}") else m[key] = o.optInt(key, -1)
+                when {
+                    key == "__r" -> { lastReader = o.optString(key); rlog("그림 뷰어 링크: $lastReader") }
+                    key.startsWith("__") -> rlog("페이지 분석: ${o.optString(key)}")
+                    else -> m[key] = o.optInt(key, -1)
+                }
             }
         } catch (e: Exception) {
             rlog("페이지 분석 결과를 못 읽음: ${res.take(200)}")
         }
         rlog("페이지 제목: ${title.ifBlank { "(없음)" }} · 고른 그림 주소 ${m.size}개")
         return m to title
+    }
+
+    @Volatile private var lastReader: String? = null
+
+    /** 화면 없는 탭 하나를 열어 두고, 일하는 스레드에서 차례로 시키기 */
+    class Headless(private val ctx: Context) {
+        private var wv: WebView? = null
+
+        fun open(url: String): Boolean {
+            val done = CountDownLatch(1)
+            var ok = false
+            main.post {
+                val w = WebView(ctx.applicationContext)
+                w.settings.javaScriptEnabled = true
+                w.settings.domStorageEnabled = true
+                w.settings.offscreenPreRaster = true
+                CookieManager.getInstance().setAcceptThirdPartyCookies(w, true)
+                val dw = ctx.resources.displayMetrics.widthPixels
+                val dh = ctx.resources.displayMetrics.heightPixels
+                w.measure(View.MeasureSpec.makeMeasureSpec(dw, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(dh, View.MeasureSpec.EXACTLY))
+                w.layout(0, 0, dw, dh)
+                w.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView, u: String) { ok = true; done.countDown() }
+                }
+                wv = w
+                w.loadUrl(url)
+            }
+            done.await(40, TimeUnit.SECONDS)
+            return ok
+        }
+
+        /** JS 결과(문자열) */
+        fun eval(js: String): String {
+            val done = CountDownLatch(1)
+            var out = ""
+            main.post {
+                val w = wv ?: run { done.countDown(); return@post }
+                w.evaluateJavascript(js) { r ->
+                    out = try { (JSONTokener(r).nextValue() ?: "").toString() } catch (e: Exception) { r ?: "" }
+                    done.countDown()
+                }
+            }
+            done.await(10, TimeUnit.SECONDS)
+            return out
+        }
+
+        fun close() = main.post { wv?.stopLoading(); wv?.destroy(); wv = null }
+    }
+
+    private const val COUNT_JS = "(function(){try{if(typeof galleryinfo!='undefined'&&galleryinfo.files)return ''+galleryinfo.files.length}catch(e){}" +
+        "var s=document.querySelector('select');if(s&&s.options.length>1)return ''+s.options.length;return '0'})()"
+
+    /** 화면에 가장 크게 보이는 그림: '주소|다 떴는지' */
+    private const val MAIN_IMG_JS = "(function(){var W=innerWidth,H=innerHeight,b=null,ba=0;document.querySelectorAll('img').forEach(function(e){" +
+        "var r=e.getBoundingClientRect();var w=Math.min(r.right,W)-Math.max(r.left,0),h=Math.min(r.bottom,H)-Math.max(r.top,0);" +
+        "if(w>0&&h>0&&w*h>ba){ba=w*h;b=e}});if(!b)return '';return (b.currentSrc||b.src)+'|'+(b.complete&&b.naturalWidth>0)})()"
+
+    /**
+     * 그림 뷰어(한 장씩 보는 페이지): 주소 끝 번호(#1, #2 …)만 바꿔 가며 한 장씩 그림 주소를 모음.
+     * 화면을 누르지 않아서 화면이 꺼져 있어도 됨.
+     */
+    fun readerImages(ctx: Context, readerUrl: String): List<String> {
+        val h = Headless(ctx)
+        val out = LinkedHashSet<String>()
+        try {
+            val base = readerUrl.substringBefore('#')
+            if (!h.open("$base#1")) { rlog("그림 뷰어를 못 열었어요: $base"); return emptyList() }
+            Thread.sleep(2500)
+            val count = h.eval(COUNT_JS).toIntOrNull() ?: 0
+            rlog("그림 뷰어 열림: $base · 장 수 ${if (count > 0) "${count}장" else "모름 (같은 그림이 계속 나오면 멈춤)"}")
+            var prev = ""
+            var miss = 0
+            for (n in 1..(if (count > 0) count else 3000)) {
+                if (n > 1) h.eval("location.hash='#$n';'1'")
+                var src = ""
+                val t0 = System.currentTimeMillis()
+                while (System.currentTimeMillis() - t0 < 6000) {
+                    Thread.sleep(250)
+                    val r = h.eval(MAIN_IMG_JS)
+                    val s = r.substringBeforeLast('|')
+                    if (s.startsWith("http") && s != prev && r.endsWith("|true")) { src = s; break }
+                }
+                if (src.isEmpty()) {
+                    miss++
+                    rlog("${n}번째 장 그림이 안 바뀜 (${miss}번 연속)")
+                    if (miss >= 3 && (count == 0 || n >= count)) break
+                    if (miss >= 8) break
+                    continue
+                }
+                miss = 0
+                prev = src
+                out.add(src)
+                if (n % 50 == 0) rlog("그림 뷰어 ${n}장째까지 주소 모음")
+            }
+            rlog("그림 뷰어에서 주소 ${out.size}개 모음")
+        } catch (e: Exception) {
+            rlog("그림 뷰어 오류: ${e.message}")
+        } finally {
+            h.close()
+        }
+        return out.toList()
     }
 
     /** 페이지를 화면 없이 열고(새 탭처럼) JS를 돌린 결과와 제목. 끝나면 그 '탭'은 닫음 */
@@ -399,6 +505,11 @@ object Sched {
         "var imgs=[].slice.call(document.querySelectorAll('img')).filter(function(e){var r=e.getBoundingClientRect();return r.width>=W*0.4&&!foreign(e);});" +
         "var all=document.querySelectorAll('img').length,wide=[].slice.call(document.querySelectorAll('img')).filter(function(e){return e.getBoundingClientRect().width>=W*0.4}).length;" +
         "out['__d']='주소 '+location.href+' · 그림 태그 '+all+'개 · 화면 폭 40% 이상 '+wide+'개 · 다른 글 링크 아닌 큰 그림 '+imgs.length+'개 · canvas '+document.querySelectorAll('canvas').length+'개 · 화면 폭 '+W;" +
+        // 그림 뷰어(리더)로 가는 링크: 큰 표지 그림이 가리키는 곳, 또는 /reader/ 링크
+        "var rd=null;[].slice.call(document.querySelectorAll('img')).some(function(e){var r=e.getBoundingClientRect();var a=e.closest('a[href]');" +
+        "if(r.width>=W*0.4&&a&&a.host==location.host&&a.href.split('#')[0]!=here){rd=a.href;return true}return false});" +
+        "if(!rd){var ra=document.querySelector('a[href*=\"/reader/\"],a[href*=\"/viewer/\"]');if(ra)rd=ra.href;}" +
+        "if(rd)out['__r']=rd;" +
         "if(!imgs.length)return JSON.stringify(out);" +
         // 본문 칸: 첫 큰 그림에서 위로 올라가며, 그 칸 안의 큰 그림 수가 가장 많아질 때까지 (다른 글 링크가 많이 든 칸은 넘지 않음)
         "var box=imgs[0],best=imgs[0],bestN=1;for(var p=imgs[0].parentElement;p&&p!=document.body;p=p.parentElement){" +
@@ -429,7 +540,14 @@ object Sched {
     /** 한 페이지를 열어 그 안의 그림을 받음. folderOverride가 있으면 '예약이름/글 제목' 폴더에 */
     private fun saveImagesOf(ctx: Context, it: Item, folderOverride: String?, up: Ftp.Session?): Pair<Int, String> {
         val perPost = folderOverride != null
-        val (found, title) = collect(ctx, it.url, onlyPost = perPost)
+        var (found, title) = if (perPost && it.url.contains("/reader/")) emptyMap<String, Int>() to "" else collect(ctx, it.url, onlyPost = perPost)
+        // 글 페이지에 본문 그림이 없고 그림 뷰어로 가는 링크가 있으면 → 뷰어에서 한 장씩
+        val reader = if (perPost && found.isEmpty()) (if (it.url.contains("/reader/")) it.url else lastReader) else null
+        if (reader != null) {
+            val list = readerImages(ctx, reader)
+            found = LinkedHashMap<String, Int>().also { m -> list.forEach { u -> m[u] = -1 } }
+            if (title.isBlank()) title = Uri.parse(it.url).lastPathSegment?.substringBeforeLast('.') ?: "글"
+        }
         if (found.isEmpty()) return 0 to "그림을 못 찾음 (페이지가 안 열렸거나 그림이 없음)"
         val seenFile = File(ctx.filesDir, "sched/${it.id}.json").apply { parentFile?.mkdirs() }
         // 글마다 받을 때는 그 글 안에서만 중복을 봄 (다른 글의 같은 그림도 받음)
@@ -447,7 +565,9 @@ object Sched {
         val folder = if (perPost) clean(it.name) + "/" + clean(title.ifBlank { Uri.parse(it.url).lastPathSegment ?: "글" }).take(80)
             else clean(it.name.ifBlank { title }.ifBlank { Uri.parse(it.url).host ?: "예약 저장" })
         if (perPost) { seen.clear(); hashes.clear() }
+        var idx = 0
         for ((u, w) in found) {
+            idx++
             if (u in seen) { rlog("건너뜀 (이미 받음): $u"); continue }
             if (w in 1 until it.minPx) { seen.add(u); rlog("건너뜀 (작은 그림 ${w}px): $u"); continue }
             try {
@@ -477,7 +597,8 @@ object Sched {
                 }
                 val base = clean(Uri.parse(u).lastPathSegment?.substringBeforeLast('.') ?: "img").take(60)
                 val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.KOREA).format(java.util.Date())
-                val fname = "${stamp}_${base}.$ext"
+                // 글마다 받을 때는 순서대로 번호 (0001, 0002 …) — 만화처럼 순서가 중요
+                val fname = if (perPost) "%04d.%s".format(idx, ext) else "${stamp}_${base}.$ext"
                 if (saveImage(ctx, folder, fname, if (type.startsWith("image")) type else "image/$ext", bytes)) {
                     saved++; rlog("저장 ${bytes.size / 1024}KB ${op.outWidth}x${op.outHeight} → $folder/$fname")
                 } else { failed++; rlog("저장 실패: $fname") }

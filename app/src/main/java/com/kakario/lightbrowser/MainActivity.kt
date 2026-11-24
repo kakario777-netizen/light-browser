@@ -162,13 +162,55 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setCustomTitle(titleView("이 페이지 예약 저장"))
             .setView(box)
-            .setPositiveButton("다음") { _, _ -> pickInterval(name.text.toString().trim().ifBlank { wv.title ?: "예약 저장" }) { every, h, m ->
-                Sched.add(this, Sched.Item(System.currentTimeMillis(), url, name.text.toString().trim().ifBlank { wv.title ?: "예약 저장" }, every, h, m), runNow = true)
-                askBatteryOnce()
-                toast("예약했어요 · 지금 한 번 바로 받아 볼게요")
-            } }
+            .setPositiveButton("다음") { _, _ ->
+                val nm = name.text.toString().trim().ifBlank { wv.title ?: "예약 저장" }
+                val modes = arrayOf(
+                    "목록에 새 글이 올라오면 그 글의 그림 전부 저장\n(게시판·갤러리 목록 페이지)",
+                    "이 페이지에 보이는 그림 저장\n(새 그림이 추가되는 한 페이지)")
+                AlertDialog.Builder(this)
+                    .setCustomTitle(titleView("$nm · 무엇을 받을까요?"))
+                    .setItems(modes) { _, w ->
+                        if (w == 1) pickInterval(nm) { every, h, m ->
+                            Sched.add(this, Sched.Item(System.currentTimeMillis(), url, nm, every, h, m), runNow = true)
+                            askBatteryOnce()
+                            toast("예약했어요 · 지금 한 번 바로 받아 볼게요")
+                        } else addPostSchedule(wv, url, nm)
+                    }
+                    .setNegativeButton("취소", null).show()
+            }
             .setNegativeButton("취소", null)
             .show()
+    }
+
+    /** 목록 페이지: 지금 있는 글 링크를 기준으로 삼고, 앞으로 새로 생기는 글만 받음 */
+    private fun addPostSchedule(wv: WebView, url: String, nm: String) {
+        wv.evaluateJavascript(Sched.LINKS_JS) { res ->
+            val raw = try { org.json.JSONTokener(res).nextValue() as? String } catch (e: Exception) { null }
+            val links = Sched.parseLinks(raw)
+            val shapes = Sched.postShapes(url, links)
+            if (shapes.isEmpty()) {
+                AlertDialog.Builder(this).setTitle("글 목록을 못 알아봤어요")
+                    .setMessage("이 페이지에서 글 링크(번호만 다른 링크가 여러 개)를 찾지 못했어요. 게시판이나 갤러리 목록 페이지에서 해 주세요.")
+                    .setPositiveButton("확인", null).show()
+                return@evaluateJavascript
+            }
+            val posts = links.count { Sched.shape(it) in shapes }
+            AlertDialog.Builder(this)
+                .setCustomTitle(titleView("$nm · 새 글 받기"))
+                .setMessage("지금 글 ${posts}개를 찾았어요. 이 글들은 이미 본 것으로 두고, 앞으로 새로 올라오는 글만 받아요.\n\n" +
+                    "새 글이 보이면 그 글을 (화면 없이) 새 탭처럼 열어 그림을 전부 저장하고 닫은 뒤, 다음 새 글도 똑같이 해요.\n" +
+                    "저장 위치: 다운로드/라이트 브라우저/$nm/글 제목/")
+                .setPositiveButton("다음") { _, _ ->
+                    pickInterval(nm) { every, h, m ->
+                        val id = System.currentTimeMillis()
+                        Sched.baseline(this, id, links)
+                        Sched.add(this, Sched.Item(id, url, nm, every, h, m, mode = 1, patterns = shapes), runNow = false)
+                        askBatteryOnce()
+                        toast("예약했어요 · 새 글이 올라오면 받아요")
+                    }
+                }
+                .setNegativeButton("취소", null).show()
+        }
     }
 
     /** 주기 고르기 (매일 정해진 시각이면 시각까지) */

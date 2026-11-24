@@ -508,7 +508,7 @@ class Pages(private val a: MainActivity) {
         }
         section(body, "예약 ${items.size}개 · 다운로드/라이트 브라우저/ 에 저장")
         items.forEach { it ->
-            val state = if (!it.enabled) "꺼짐" else it.whenText() + (if (it.nextAt > 0) " · 다음 ${fmt.format(java.util.Date(it.nextAt))}" else "")
+            val state = (if (it.mode == 1) "새 글 받기 · " else "이 페이지 그림 · ") + if (!it.enabled) "꺼짐" else it.whenText() + (if (it.nextAt > 0) " · 다음 ${fmt.format(java.util.Date(it.nextAt))}" else "")
             val last = if (it.lastRun > 0) "\n마지막 ${fmt.format(java.util.Date(it.lastRun))}: ${it.lastResult} · 모두 ${it.total}장" else "\n아직 안 돌았어요"
             row(body, it.name, state + last, null) {
                 val acts = listOf<Pair<String, () -> Unit>>(

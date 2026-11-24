@@ -56,10 +56,13 @@ object Sched {
         var lastResult: String = "",
         var total: Int = 0,
         var nextAt: Long = 0,
+        var mode: Int = 0,          // 0: 이 페이지 그림, 1: 목록에 새 글이 올라오면 그 글의 그림
+        var patterns: List<String> = emptyList(),   // 새 글 링크 모양 (mode 1)
     ) {
         fun toJson() = JSONObject().put("id", id).put("url", url).put("name", name).put("every", everyMin)
             .put("h", atHour).put("m", atMin).put("min", minPx).put("on", enabled).put("last", lastRun)
-            .put("res", lastResult).put("total", total).put("next", nextAt)
+            .put("res", lastResult).put("total", total).put("next", nextAt).put("mode", mode)
+            .put("pat", JSONArray(patterns))
 
         fun whenText(): String = when {
             everyMin == 0 -> "매일 %02d:%02d".format(atHour, atMin)
@@ -71,7 +74,8 @@ object Sched {
         companion object {
             fun of(o: JSONObject) = Item(o.getLong("id"), o.getString("url"), o.optString("name"), o.optInt("every", 180),
                 o.optInt("h", 9), o.optInt("m", 0), o.optInt("min", 300), o.optBoolean("on", true), o.optLong("last"),
-                o.optString("res"), o.optInt("total"), o.optLong("next"))
+                o.optString("res"), o.optInt("total"), o.optLong("next"), o.optInt("mode"),
+                o.optJSONArray("pat")?.let { a -> List(a.length()) { a.getString(it) } } ?: emptyList())
         }
     }
 
@@ -105,6 +109,7 @@ object Sched {
         saveAll(ctx, list(ctx).filter { it.id != id })
         WorkManager.getInstance(ctx).cancelUniqueWork("sched-$id")
         File(ctx.filesDir, "sched/$id.json").delete()
+        File(ctx.filesDir, "sched/$id.links").delete()
     }
 
     /** 다음 실행 예약 (delay를 주면 그만큼 뒤에, 아니면 주기·시각대로) */
@@ -146,8 +151,20 @@ object Sched {
 
     /** 페이지를 화면 없이 열어서 그림 주소들을 모음 (주소 → 그림 너비, 모르면 -1) */
     fun collect(ctx: Context, url: String): Pair<Map<String, Int>, String> {
+        val (res, title) = loadAndRun(ctx, url, COLLECT_JS, scroll = true)
+        val m = LinkedHashMap<String, Int>()
+        try {
+            val o = JSONObject(res)
+            o.keys().forEach { key -> m[key] = o.optInt(key, -1) }
+        } catch (e: Exception) {
+        }
+        return m to title
+    }
+
+    /** 페이지를 화면 없이 열고(새 탭처럼) JS를 돌린 결과와 제목. 끝나면 그 '탭'은 닫음 */
+    fun loadAndRun(ctx: Context, url: String, js: String, scroll: Boolean): Pair<String, String> {
         val done = CountDownLatch(1)
-        var result: Map<String, Int> = emptyMap()
+        var result = ""
         var title = ""
         main.post {
             val wv = WebView(ctx.applicationContext)
@@ -170,21 +187,14 @@ object Sched {
                 val steps = 14
                 val scroller = object : Runnable {
                     override fun run() {
-                        if (k <= steps) {
+                        if (scroll && k <= steps) {
                             wv.evaluateJavascript("window.scrollTo(0,(document.body?document.body.scrollHeight:0)*$k/$steps)", null)
                             k++
                             main.postDelayed(this, 700)
                             return
                         }
-                        wv.evaluateJavascript(COLLECT_JS) { res ->
-                            try {
-                                val s = JSONTokener(res).nextValue() as? String ?: "{}"
-                                val o = JSONObject(s)
-                                val m = HashMap<String, Int>()
-                                o.keys().forEach { key -> m[key] = o.optInt(key, -1) }
-                                result = m
-                            } catch (e: Exception) {
-                            }
+                        wv.evaluateJavascript(js) { res ->
+                            result = try { JSONTokener(res).nextValue() as? String ?: "" } catch (e: Exception) { "" }
                             title = wv.title ?: ""
                             wv.stopLoading()
                             wv.destroy()
@@ -215,11 +225,82 @@ object Sched {
         "document.querySelectorAll('a[href]').forEach(function(a){if(/\\.(jpe?g|png|webp|gif|avif)(\\?|$)/i.test(a.href))add(a.href,-1)});" +
         "return JSON.stringify(out);})()"
 
+    // ---------------- 목록에 새 글 ----------------
+
+    /** 페이지 안 링크들 (주소 → 글자) */
+    const val LINKS_JS = "(function(){var o=[];document.querySelectorAll('a[href]').forEach(function(a){" +
+        "var h=a.href;if(!/^https?:/.test(h))return;h=h.split('#')[0];o.push([h,(a.innerText||'').trim().slice(0,80)]);});" +
+        "return JSON.stringify(o);})()"
+
+    fun parseLinks(res: String?): List<String> = try {
+        val a = JSONArray(res ?: "[]")
+        List(a.length()) { a.getJSONArray(it).getString(0) }.distinct()
+    } catch (e: Exception) { emptyList() }
+
+    /** 링크 모양: 같은 사이트·같은 경로에 번호만 다른 것끼리 같은 모양 (글 목록의 글 링크를 가려내려고) */
+    fun shape(u: String): String {
+        val p = Uri.parse(u)
+        val path = (p.path ?: "").replace(Regex("\\d+"), "#")
+        val q = p.queryParameterNames.sorted().joinToString("&") { k ->
+            val v = p.getQueryParameter(k) ?: ""
+            k + "=" + (if (v.any { it.isDigit() }) v.replace(Regex("\\d+"), "#") else v)
+        }
+        return (p.host ?: "") + path + if (q.isNotEmpty()) "?$q" else ""
+    }
+
+    /** 글 링크로 보이는 모양들: 번호가 들어 있고 5개 이상 반복되는 모양 */
+    fun postShapes(listUrl: String, links: List<String>): List<String> {
+        val host = Uri.parse(listUrl).host
+        val count = links.filter { Uri.parse(it).host == host }.groupingBy { shape(it) }.eachCount()
+        val good = count.filter { (k, n) -> n >= 5 && k.contains('#') }.keys
+        return good.sortedByDescending { count[it] }.take(3)
+    }
+
+    fun seenFile(ctx: Context, id: Long) = File(ctx.filesDir, "sched/$id.links").apply { parentFile?.mkdirs() }
+
+    /** 등록할 때: 지금 보이는 글들은 '이미 본 것'으로 */
+    fun baseline(ctx: Context, id: Long, links: List<String>) {
+        runCatching { seenFile(ctx, id).writeText(JSONArray(links).toString()) }
+    }
+
+    /** 목록을 열어 새 글을 찾고, 새 글마다 (새 탭처럼) 열어 그림을 다 받고 닫음 */
+    private fun runPosts(ctx: Context, it: Item): Pair<Int, String> {
+        val (res, _) = loadAndRun(ctx, it.url, LINKS_JS, scroll = false)
+        val links = parseLinks(res)
+        if (links.isEmpty()) return 0 to "목록을 못 열었어요"
+        val seen = LinkedHashSet<String>()
+        try { JSONArray(seenFile(ctx, it.id).readText()).let { a -> for (i in 0 until a.length()) seen.add(a.getString(i)) } } catch (e: Exception) {}
+        val shapes = it.patterns.toSet()
+        val fresh = links.filter { l -> l !in seen && (shapes.isEmpty() || shape(l) in shapes) }.take(20)
+        if (fresh.isEmpty()) return 0 to "새 글 없음"
+        var pics = 0
+        var posts = 0
+        // 오래된 글(목록 아래쪽)부터
+        for (post in fresh.reversed()) {
+            val one = Item(it.id, post, it.name, 0, minPx = it.minPx)
+            val (n, _) = saveImagesOf(ctx, one, folderOverride = "")
+            seen.add(post)
+            posts++
+            pics += n.coerceAtLeast(0)
+            runCatching { seenFile(ctx, it.id).writeText(JSONArray(seen.toList().takeLast(5000)).toString()) }
+        }
+        return pics to "새 글 ${posts}개 · 그림 ${pics}장 저장"
+    }
+
     /** 한 번 실행: 새 그림만 받아 저장. 결과 문구를 돌려줌 */
     fun runOnce(ctx: Context, it: Item): Pair<Int, String> {
+        if (it.mode == 1) return runPosts(ctx, it)
+        val (n, text) = saveImagesOf(ctx, it, null)
+        return n.coerceAtLeast(0) to text
+    }
+
+    /** 한 페이지를 열어 그 안의 그림을 받음. folderOverride가 있으면 '예약이름/글 제목' 폴더에 */
+    private fun saveImagesOf(ctx: Context, it: Item, folderOverride: String?): Pair<Int, String> {
         val (found, title) = collect(ctx, it.url)
         if (found.isEmpty()) return 0 to "그림을 못 찾음 (페이지가 안 열렸거나 그림이 없음)"
+        val perPost = folderOverride != null
         val seenFile = File(ctx.filesDir, "sched/${it.id}.json").apply { parentFile?.mkdirs() }
+        // 글마다 받을 때는 그 글 안에서만 중복을 봄 (다른 글의 같은 그림도 받음)
         val seen = LinkedHashSet<String>()
         val hashes = LinkedHashSet<String>()
         try {
@@ -231,7 +312,9 @@ object Sched {
         val ua = android.webkit.WebSettings.getDefaultUserAgent(ctx)
         var saved = 0
         var failed = 0
-        val folder = clean(it.name.ifBlank { title }.ifBlank { Uri.parse(it.url).host ?: "예약 저장" })
+        val folder = if (perPost) clean(it.name) + "/" + clean(title.ifBlank { Uri.parse(it.url).lastPathSegment ?: "글" }).take(80)
+            else clean(it.name.ifBlank { title }.ifBlank { Uri.parse(it.url).host ?: "예약 저장" })
+        if (perPost) { seen.clear(); hashes.clear() }
         for ((u, w) in found) {
             if (u in seen) continue
             if (w in 1 until it.minPx) { seen.add(u); continue }
@@ -266,8 +349,10 @@ object Sched {
             }
         }
         // 기억은 최근 것 위주로 (파일이 끝없이 커지지 않게)
-        val o = JSONObject().put("u", JSONArray(seen.toList().takeLast(20000))).put("h", JSONArray(hashes.toList().takeLast(20000)))
-        runCatching { seenFile.writeText(o.toString()) }
+        if (!perPost) {
+            val o = JSONObject().put("u", JSONArray(seen.toList().takeLast(20000))).put("h", JSONArray(hashes.toList().takeLast(20000)))
+            runCatching { seenFile.writeText(o.toString()) }
+        }
         val text = (if (saved > 0) "새 그림 ${saved}장 저장" else "새 그림 없음") + (if (failed > 0) " · 실패 $failed" else "")
         return saved to text
     }

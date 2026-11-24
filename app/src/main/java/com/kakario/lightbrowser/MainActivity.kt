@@ -143,34 +143,36 @@ class MainActivity : Activity() {
         val wv = currentWebView()
         val url = wv?.url
         if (wv == null || url == null || !url.startsWith("http")) { toast("예약할 페이지를 먼저 열어 주세요"); return }
+        chooseMainName(wv, url, "이 페이지 예약 저장") { nm -> addScheduleNamed(wv, url, nm) }
+    }
+
+    /** 메인 폴더 이름 고르기: 후보 3~4개 + 기타(직접 입력) */
+    private fun chooseMainName(wv: WebView, url: String, what: String, then: (String) -> Unit) {
         wv.evaluateJavascript(Sched.SEARCH_JS) { r ->
             val q = try { org.json.JSONTokener(r).nextValue() as? String } catch (e: Exception) { null }
-            addScheduleNamed(wv, url, Sched.mainName(q, url, wv.title))
+            wv.evaluateJavascript(Sched.LINKS_JS) { lr ->
+                val links = try { org.json.JSONTokener(lr).nextValue() as? String } catch (e: Exception) { null }
+                val cands = Sched.nameCandidates(q, url, wv.title, links)
+                val items = cands + "기타 (직접 입력)…"
+                AlertDialog.Builder(this)
+                    .setCustomTitle(titleView("$what · 메인 폴더 이름"))
+                    .setItems(items.toTypedArray()) { _, w ->
+                        if (w < cands.size) { then(cands[w]); return@setItems }
+                        val et = EditText(this).apply { hint = "폴더 이름"; isSingleLine = true; setText(cands.firstOrNull() ?: "") }
+                        AlertDialog.Builder(this).setTitle("메인 폴더 이름 직접 입력")
+                            .setView(LinearLayout(this).apply { setPadding(dp(24), dp(8), dp(24), 0); addView(et, LinearLayout.LayoutParams(-1, -2)) })
+                            .setPositiveButton("확인") { _, _ -> et.text.toString().trim().takeIf { it.isNotEmpty() }?.let(then) }
+                            .setNegativeButton("취소", null).show()
+                    }
+                    .setNegativeButton("취소", null).show()
+            }
         }
     }
 
     private fun addScheduleNamed(wv: WebView, url: String, defName: String) {
-        val name = EditText(this).apply {
-            setText(defName.take(80))
-            hint = "이름 (저장 폴더 이름)"
-            isSingleLine = true
-        }
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(8), dp(24), 0)
-            addView(name)
-            addView(TextView(this@MainActivity).apply {
-                text = "화면이 꺼져 있어도 정한 때마다 이 페이지를 몰래 열어서, 아직 안 받은 그림만 저장해요.\n저장 위치: 다운로드/라이트 브라우저/이름/"
-                textSize = 13f
-                setTextColor(col(R.color.sub))
-                setPadding(0, dp(8), 0, 0)
-            })
-        }
-        AlertDialog.Builder(this)
-            .setCustomTitle(titleView("이 페이지 예약 저장"))
-            .setView(box)
-            .setPositiveButton("다음") { _, _ ->
-                val nm = name.text.toString().trim().ifBlank { wv.title ?: "예약 저장" }
+        run {
+            run {
+                val nm = defName.take(80).ifBlank { "예약 저장" }
                 val modes = arrayOf(
                     "목록에 새 글이 올라오면 그 글의 그림 전부 저장\n(게시판·갤러리 목록 페이지)",
                     "이 페이지에 보이는 그림 저장\n(새 그림이 추가되는 한 페이지)")
@@ -187,8 +189,7 @@ class MainActivity : Activity() {
                     }
                     .setNegativeButton("취소", null).show()
             }
-            .setNegativeButton("취소", null)
-            .show()
+        }
     }
 
     /** 목록 페이지: 지금 있는 글 링크를 기준으로 삼고, 앞으로 새로 생기는 글만 받음 */
@@ -243,8 +244,8 @@ class MainActivity : Activity() {
             }
             val pages = Sched.pageTemplate(url, Sched.parseRaw(raw))
             val posts = links.count { Sched.shape(it) in shapes }
-            val search = try { org.json.JSONTokener(qres).nextValue() as? String } catch (e: Exception) { null }
-            val nm = Sched.mainName(search, url, wv.title).ifBlank { "목록" }.take(80)
+            chooseMainName(wv, url, "이 목록 전부 받기") { picked ->
+            val nm = picked.take(80)
             AlertDialog.Builder(this)
                 .setCustomTitle(titleView("이 목록 전부 받기"))
                 .setMessage("이 쪽 글 ${posts}개" + (if (pages != null) " · 쪽 번호 ${pages.second}쪽까지 보임 (끝 쪽은 들어가서 더 찾아요)" else " · 쪽 번호는 못 찾음 (이 쪽만 받아요)") +
@@ -261,6 +262,7 @@ class MainActivity : Activity() {
                     }
                 }
                 .setNegativeButton("취소", null).show()
+            }
         } }
     }
 

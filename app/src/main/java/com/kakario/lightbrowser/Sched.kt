@@ -700,6 +700,45 @@ object Sched {
         return ""
     }
 
+    /**
+     * 메인 폴더 이름 후보 3~4개: 검색창 검색어(그리고 태그 뺀 핵심 단어), 목록에 공통으로 나오는 작가,
+     * 글 제목들에 공통으로 들어간 단어, 페이지 제목
+     */
+    fun nameCandidates(search: String?, url: String, title: String?, linksRes: String?): List<String> {
+        val out = LinkedHashSet<String>()
+        val s = search?.trim().orEmpty().ifBlank { searchFromUrl(url) }
+        if (s.isNotBlank()) {
+            out.add(clean(s))
+            // "artist:himajin_no_izu korean" → "himajin no izu" (태그 이름·언어 빼고 핵심 단어)
+            val core = s.split(Regex("\\s+")).filter { w -> !Regex("^(korean|english|japanese|chinese|한국어|language:.*)$", RegexOption.IGNORE_CASE).matches(w) }
+                .joinToString(" ") { w -> w.substringAfter(':').replace('_', ' ') }.trim()
+            if (core.isNotBlank()) out.add(clean(core))
+        }
+        // 목록에 공통으로 나오는 작가 (작가 링크 글자 중 가장 많이 나온 것)
+        val rows = try {
+            val a = JSONArray(linksRes ?: "[]")
+            List(a.length()) { a.getJSONArray(it).let { x -> x.getString(0) to x.optString(1) } }
+        } catch (e: Exception) { emptyList() }
+        rows.filter { (h, t) -> t.isNotBlank() && Regex("/(artist|artists|author|writer|circle|group|작가)[/=]|[?&](artist|author)=", RegexOption.IGNORE_CASE).containsMatchIn(h) }
+            .groupingBy { it.second.trim() }.eachCount().filter { it.value >= 2 }.maxByOrNull { it.value }
+            ?.let { out.add(clean(it.key)) }
+        // 글 제목들에 공통으로 들어간 단어
+        val shapes = postShapes(url, rows.map { it.first })
+        val titles = rows.filter { (h, t) -> t.length > 2 && shape(h) in shapes }.map { it.second }.distinct()
+        if (titles.size >= 3) {
+            val stop = setOf("the", "of", "and", "a", "an", "to", "in", "on", "for", "with", "chap", "chapter", "vol", "ch", "part", "ep", "no", "by")
+            val cnt = HashMap<String, Int>()
+            titles.forEach { t ->
+                t.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { w -> w.length >= 2 && w !in stop && !w.all { it.isDigit() } }.toSet()
+                    .forEach { w -> cnt[w] = (cnt[w] ?: 0) + 1 }
+            }
+            cnt.filter { it.value >= maxOf(2, titles.size * 2 / 5) }.entries.sortedByDescending { it.value }.take(2)
+                .map { it.key }.takeIf { it.isNotEmpty() }?.let { out.add(clean(it.joinToString(" "))) }
+        }
+        niceTitle(title).takeIf { it.isNotBlank() }?.let { out.add(it) }
+        return out.filter { it.isNotBlank() && it != "img" }.take(4)
+    }
+
     /** 메인 폴더 이름: 검색창 검색어 → 주소 속 검색어 → 페이지 제목 (한국어 위주) */
     fun mainName(search: String?, url: String, title: String?): String {
         val s = search?.trim().orEmpty().ifBlank { searchFromUrl(url) }

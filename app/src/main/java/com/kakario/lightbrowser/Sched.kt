@@ -92,6 +92,14 @@ object Sched {
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences("sched", Context.MODE_PRIVATE)
 
+    /** 테스트할 때만: 한 단계씩 무슨 일이 있었는지 기록 */
+    @Volatile var report: StringBuilder? = null
+    private fun rlog(s: String) {
+        report?.append(java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.KOREA).format(java.util.Date()))?.append("  ")?.append(s)?.append('\n')
+    }
+    fun lastTest(ctx: Context): String = prefs(ctx).getString("lastTest", "") ?: ""
+    fun setLastTest(ctx: Context, s: String) = prefs(ctx).edit().putString("lastTest", s).apply()
+
     fun list(ctx: Context): MutableList<Item> = try {
         val a = JSONArray(prefs(ctx).getString("items", "[]"))
         MutableList(a.length()) { Item.of(a.getJSONObject(it)) }
@@ -170,9 +178,13 @@ object Sched {
         val m = LinkedHashMap<String, Int>()
         try {
             val o = JSONObject(res)
-            o.keys().forEach { key -> m[key] = o.optInt(key, -1) }
+            o.keys().forEach { key ->
+                if (key.startsWith("__")) rlog("페이지 분석: ${o.optString(key)}") else m[key] = o.optInt(key, -1)
+            }
         } catch (e: Exception) {
+            rlog("페이지 분석 결과를 못 읽음: ${res.take(200)}")
         }
+        rlog("페이지 제목: ${title.ifBlank { "(없음)" }} · 고른 그림 주소 ${m.size}개")
         return m to title
     }
 
@@ -220,11 +232,18 @@ object Sched {
                 main.postDelayed(scroller, 2500)
             }
             wv.webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView, u: String) = finish()
+                override fun onPageFinished(view: WebView, u: String) { rlog("페이지 열림: $u"); finish() }
+                override fun onReceivedError(view: WebView, req: android.webkit.WebResourceRequest, err: android.webkit.WebResourceError) {
+                    if (req.isForMainFrame) rlog("페이지 열기 오류: ${err.errorCode} ${err.description}")
+                }
+                override fun onReceivedHttpError(view: WebView, req: android.webkit.WebResourceRequest, r: android.webkit.WebResourceResponse) {
+                    if (req.isForMainFrame) rlog("페이지 서버 응답: ${r.statusCode} ${r.reasonPhrase}")
+                }
             }
+            rlog("화면 없이 열기: $url (크기 ${w}x${h})")
             wv.loadUrl(url)
             // 페이지가 끝까지 안 떠도 40초 뒤에는 있는 만큼 모음
-            main.postDelayed({ finish() }, 40_000)
+            main.postDelayed({ if (!started) rlog("40초 동안 다 안 떠서 있는 만큼 모음"); finish() }, 40_000)
         }
         done.await(120, TimeUnit.SECONDS)
         return result to title
@@ -378,13 +397,16 @@ object Sched {
         "function foreign(e){var a=e.closest('a[href]');if(!a)return false;var h=a.href.split('#')[0];" +
         "if(!/^https?:/.test(h)||h==here)return false;if(/\\.(jpe?g|png|webp|gif|avif)(\\?|$)/i.test(h))return false;return true;}" +
         "var imgs=[].slice.call(document.querySelectorAll('img')).filter(function(e){var r=e.getBoundingClientRect();return r.width>=W*0.4&&!foreign(e);});" +
-        "if(!imgs.length)return '{}';" +
+        "var all=document.querySelectorAll('img').length,wide=[].slice.call(document.querySelectorAll('img')).filter(function(e){return e.getBoundingClientRect().width>=W*0.4}).length;" +
+        "out['__d']='주소 '+location.href+' · 그림 태그 '+all+'개 · 화면 폭 40% 이상 '+wide+'개 · 다른 글 링크 아닌 큰 그림 '+imgs.length+'개 · canvas '+document.querySelectorAll('canvas').length+'개 · 화면 폭 '+W;" +
+        "if(!imgs.length)return JSON.stringify(out);" +
         // 본문 칸: 첫 큰 그림에서 위로 올라가며, 그 칸 안의 큰 그림 수가 가장 많아질 때까지 (다른 글 링크가 많이 든 칸은 넘지 않음)
         "var box=imgs[0],best=imgs[0],bestN=1;for(var p=imgs[0].parentElement;p&&p!=document.body;p=p.parentElement){" +
         "var n=imgs.filter(function(i){return p.contains(i)}).length;var links=[].slice.call(p.querySelectorAll('a[href] img')).filter(foreign).length;" +
         "if(links>=4)break;if(n>bestN){bestN=n;best=p;}}" +
         "imgs.forEach(function(e){if(best===e||best.contains(e)){var w=e.naturalWidth||-1;add(e.currentSrc||e.src,w);" +
         "['data-src','data-original','data-lazy-src','data-url'].forEach(function(a){var v=e.getAttribute(a);if(v)add(v,-1)});}});" +
+        "out['__d']+=' · 본문 칸 안 그림 '+(Object.keys(out).length-1)+'개';" +
         "return JSON.stringify(out);})()"
 
     /** 한 번 실행: 새 그림만 받아 저장. 결과 문구를 돌려줌 */
@@ -426,8 +448,8 @@ object Sched {
             else clean(it.name.ifBlank { title }.ifBlank { Uri.parse(it.url).host ?: "예약 저장" })
         if (perPost) { seen.clear(); hashes.clear() }
         for ((u, w) in found) {
-            if (u in seen) continue
-            if (w in 1 until it.minPx) { seen.add(u); continue }
+            if (u in seen) { rlog("건너뜀 (이미 받음): $u"); continue }
+            if (w in 1 until it.minPx) { seen.add(u); rlog("건너뜀 (작은 그림 ${w}px): $u"); continue }
             try {
                 val c = URL(u).openConnection() as HttpURLConnection
                 c.connectTimeout = 15000
@@ -435,18 +457,20 @@ object Sched {
                 c.setRequestProperty("User-Agent", ua)
                 c.setRequestProperty("Referer", it.url)
                 CookieManager.getInstance().getCookie(u)?.let { ck -> c.setRequestProperty("Cookie", ck) }
-                if (c.responseCode != 200) { failed++; c.disconnect(); continue }
+                if (c.responseCode != 200) { rlog("받기 실패 (서버 ${c.responseCode}): $u"); failed++; c.disconnect(); continue }
                 val type = c.contentType ?: ""
                 val bytes = c.inputStream.use { s -> s.readBytes() }
                 c.disconnect()
                 seen.add(u)
-                if (!type.startsWith("image") && !Regex("\\.(jpe?g|png|webp|gif|avif)(\\?|$)", RegexOption.IGNORE_CASE).containsMatchIn(u)) continue
+                if (!type.startsWith("image") && !Regex("\\.(jpe?g|png|webp|gif|avif)(\\?|$)", RegexOption.IGNORE_CASE).containsMatchIn(u)) {
+                    rlog("그림이 아님 ($type, ${bytes.size}B): $u"); continue
+                }
                 // 작은 그림(아이콘·버튼) 거르기
                 val op = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.size, op)
-                if (op.outWidth > 0 && maxOf(op.outWidth, op.outHeight) < it.minPx) continue
+                if (op.outWidth > 0 && maxOf(op.outWidth, op.outHeight) < it.minPx) { rlog("건너뜀 (작은 그림 ${op.outWidth}x${op.outHeight}): $u"); continue }
                 val h = MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { b -> "%02x".format(b) }
-                if (!hashes.add(h)) continue   // 주소만 다른 같은 그림
+                if (!hashes.add(h)) { rlog("건너뜀 (같은 그림): $u"); continue }   // 주소만 다른 같은 그림
                 val ext = when {
                     type.contains("png") -> "png"; type.contains("webp") -> "webp"; type.contains("gif") -> "gif"
                     type.contains("avif") -> "avif"; else -> "jpg"
@@ -454,10 +478,13 @@ object Sched {
                 val base = clean(Uri.parse(u).lastPathSegment?.substringBeforeLast('.') ?: "img").take(60)
                 val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.KOREA).format(java.util.Date())
                 val fname = "${stamp}_${base}.$ext"
-                if (saveImage(ctx, folder, fname, if (type.startsWith("image")) type else "image/$ext", bytes)) saved++ else failed++
+                if (saveImage(ctx, folder, fname, if (type.startsWith("image")) type else "image/$ext", bytes)) {
+                    saved++; rlog("저장 ${bytes.size / 1024}KB ${op.outWidth}x${op.outHeight} → $folder/$fname")
+                } else { failed++; rlog("저장 실패: $fname") }
                 up?.upload(folder, fname, bytes)
             } catch (e: Exception) {
                 failed++
+                rlog("받기 오류 ${e.javaClass.simpleName}: ${e.message} · $u")
             }
         }
         // 기억은 최근 것 위주로 (파일이 끝없이 커지지 않게)
@@ -510,9 +537,10 @@ object Sched {
             .build()
     }
 
-    fun doneNote(ctx: Context, it: Item, text: String) {
+    fun doneNote(ctx: Context, it: Item, text: String, test: Boolean = false) {
         channel(ctx)
-        val open = PendingIntent.getActivity(ctx, 900, Intent(ctx, MainActivity::class.java).putExtra("open_sched", true)
+        val open = PendingIntent.getActivity(ctx, if (test) 901 else 900, Intent(ctx, MainActivity::class.java)
+            .putExtra(if (test) "open_test_log" else "open_sched", true)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         ctx.getSystemService(NotificationManager::class.java).notify(5000 + (it.id % 1000).toInt(),
             Notification.Builder(ctx, "sched")
@@ -627,12 +655,20 @@ class TestWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {
         val conf = Ftp.conf(ctx)
         val up = if (inputData.getBoolean("ftp", false) && conf.ok) Ftp.Session(conf) else null
         val started = System.currentTimeMillis()
-        val n = try { Sched.savePost(ctx, Sched.Item(1, post, "테스트", 0), post, up) } catch (e: Exception) { 0 }
+        Sched.report = StringBuilder()
+        val pm = ctx.getSystemService(android.os.PowerManager::class.java)
+        Sched.report?.append("테스트 시작 · 화면 ${if (pm.isInteractive) "켜짐" else "꺼짐"} · 배터리 최적화 ${if (pm.isIgnoringBatteryOptimizations(ctx.packageName)) "빠짐" else "켜짐"}\n")
+        val n = try { Sched.savePost(ctx, Sched.Item(1, post, "테스트", 0), post, up) } catch (e: Exception) {
+            Sched.report?.append("오류: ${e.javaClass.simpleName} ${e.message}\n"); 0
+        }
         up?.close()
+        Sched.report?.append("끝 · 화면 ${if (pm.isInteractive) "켜짐" else "꺼짐"} · 저장 ${n}장" + (up?.error?.let { " · FTP 오류: $it" } ?: "") + "\n")
+        Sched.setLastTest(ctx, Sched.report.toString())
+        Sched.report = null
         val secs = (System.currentTimeMillis() - started) / 1000
         val text = (if (n > 0) "그림 ${n}장 저장 (${secs}초)" else "그림을 못 받았어요 (${secs}초)") +
             (up?.error?.let { " · FTP 오류: $it" } ?: if (up != null) " · FTP에도 올림" else "")
-        Sched.doneNote(ctx, Sched.Item(1, post, "테스트", 0), text)
+        Sched.doneNote(ctx, Sched.Item(1, post, "테스트", 0), text, test = true)
         Result.success()
     }
 }

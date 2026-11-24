@@ -146,6 +146,7 @@ class Pages(private val a: MainActivity) {
             back()
             a.schedTest()
         }
+        row(body, "지난 테스트 기록 보기", "무슨 일이 있었는지 한 줄씩 · 복사해서 채팅에 붙여 주세요", null) { a.showTestLog() }
 
         section(body, "광고 · 차단")
         switchRow(body, "광고 차단", "광고 서버·광고 칸·광고 팝업을 막아요", a.adblockOn) { a.setAdblock(it) }

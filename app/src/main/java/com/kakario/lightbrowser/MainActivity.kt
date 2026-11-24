@@ -298,6 +298,32 @@ class MainActivity : Activity() {
         }
     }
 
+    /** 테스트 기록 창: 그대로 복사해서 보내 주면 원인을 볼 수 있게 */
+    fun showTestLog() {
+        val log = Sched.lastTest(this).ifBlank { "아직 테스트 기록이 없어요" }
+        val tv = TextView(this).apply {
+            text = log
+            textSize = 12f
+            setTextIsSelectable(true)
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextColor(col(R.color.text))
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("예약 저장 테스트 기록")
+            .setView(android.widget.ScrollView(this).apply { addView(tv) })
+            .setPositiveButton("복사") { _, _ ->
+                getSystemService(android.content.ClipboardManager::class.java)
+                    .setPrimaryClip(android.content.ClipData.newPlainText("테스트 기록", log))
+                toast("복사했어요 · 채팅에 붙여 넣어 주세요")
+            }
+            .setNeutralButton("공유") { _, _ ->
+                startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, log), "테스트 기록 보내기"))
+            }
+            .setNegativeButton("닫기", null)
+            .show()
+    }
+
     /** 설정 › 예약 저장 FTP 서버 */
     fun editFtp() {
         val c = Ftp.conf(this)
@@ -444,6 +470,11 @@ class MainActivity : Activity() {
                 i.removeExtra(BgWork.EXTRA_DOWNLOADS)
                 closeOverlays()
                 pages.openDownloads()
+                return
+            }
+            i.getBooleanExtra("open_test_log", false) -> {
+                i.removeExtra("open_test_log")
+                showTestLog()
                 return
             }
             i.getBooleanExtra("open_sched", false) -> {
